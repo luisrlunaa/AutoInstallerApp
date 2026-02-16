@@ -34,4 +34,9 @@
 	  </EmbeddedResource>
 	</ItemGroup>
 
+	<ItemGroup>
+	  <PackageReference Include="FlaUI.Core" Version="3.3.0" />
+	  <PackageReference Include="FlaUI.UIA3" Version="4.0.0" />
+	</ItemGroup>
+
 </Project>

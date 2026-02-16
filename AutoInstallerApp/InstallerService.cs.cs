@@ -106,7 +106,6 @@ namespace AutoInstallerApp
             }
         }
 
-
         public enum RiskLevel
         {
             LowRisk,
