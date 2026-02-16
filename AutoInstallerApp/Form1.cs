@@ -1,18 +1,10 @@
-using System;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Forms;
-using System.Collections.Generic;
 
 namespace AutoInstallerApp
 {
     public partial class Form1 : Form
     {
-        private CancellationTokenSource cancelToken;
-        private bool isInstalling = false;
+        private CancellationTokenSource? cancelToken;
 
         public Form1()
         {
@@ -27,9 +19,37 @@ namespace AutoInstallerApp
             }
 
             // Ensure STOP hidden initially
-            try { btnStop.Visible = false; } catch { }
+            try { btnStop.Visible = false; btnSkip.Visible = false; } catch { }
+
+            // Ensure progress label starts at 0% and is visible in front of the progress bar
+            try
+            {
+                progressBarlbl.Text = "0%";
+                progressBarlbl.Visible = true;
+                progressBarlbl.BringToFront();
+            }
+            catch { }
 
             this.Load += Form1_Load;
+            // Timer for elapsed time display
+            uiTimer = new System.Windows.Forms.Timer();
+            uiTimer.Interval = 1000; // 1 second
+            uiTimer.Tick += UiTimer_Tick;
+        }
+
+        private System.Windows.Forms.Timer uiTimer;
+        private DateTime? startTime;
+
+        private void UiTimer_Tick(object? sender, EventArgs e)
+        {
+            if (startTime == null)
+            {
+                lblTimer.Text = "00:00:00";
+                return;
+            }
+
+            var span = DateTime.Now - startTime.Value;
+            lblTimer.Text = string.Format("{0:00}:{1:00}:{2:00}", (int)span.TotalHours, span.Minutes, span.Seconds);
         }
 
         private void Form1_Load(object? sender, EventArgs e)
@@ -37,7 +57,19 @@ namespace AutoInstallerApp
             // Load image lazily so startup doesn't block on large resource decoding
             try
             {
-                pictureBox1.Image = Properties.Resources.AIA;
+                // Load image in background to avoid UI thread pause
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        var img = Properties.Resources.AIA;
+                        pictureBox1.Invoke(() => pictureBox1.Image = img);
+                    }
+                    catch (Exception ex)
+                    {
+                        try { Logger.Write("[LOAD IMAGE ERROR] " + ex.ToString()); } catch { }
+                    }
+                });
             }
             catch (Exception ex)
             {
@@ -70,12 +102,26 @@ namespace AutoInstallerApp
             // === UI: Cambiar botones ===
             btnStart.Visible = false;
             btnStop.Visible = true;
-            isInstalling = true;
+            btnSkip.Visible = true;
+
+            // Start elapsed timer — reset only if label currently has a non-zero value
+            try
+            {
+                if (!string.IsNullOrEmpty(lblTimer.Text) && lblTimer.Text != "00:00:00")
+                {
+                    try { lblTimer.Text = "00:00:00"; } catch { }
+                }
+            }
+            catch { }
+
+            startTime = DateTime.Now;
+            try { uiTimer.Start(); } catch { }
 
             cancelToken = new CancellationTokenSource();
 
             progressBar.Value = 0;
-            progressBar.Maximum = installers.Length;
+            // Progress is reported as percentage (0-100)
+            progressBar.Maximum = 100;
 
             AddLog("Classifying installers...");
             Logger.Write("Classifying installers...");
@@ -86,6 +132,7 @@ namespace AutoInstallerApp
                 var lowRisk = new List<string>();
                 var mediumRisk = new List<string>();
                 var highRisk = new List<string>();
+                var rdpFiles = new List<string>();
 
                 foreach (string file in installers)
                 {
@@ -96,22 +143,8 @@ namespace AutoInstallerApp
 
                     if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                     {
-                        try
-                        {
-                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                            string dest = Path.Combine(desktop, name);
-                            File.Copy(file, dest, true);
-                            // Log from background thread via Logger only; enqueue UI log
-                            Logger.Write($"[RDP COPIED] {name}");
-                            this.Invoke(() => AddLog($"[RDP COPIED] {name}"));
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Write("[RDP COPY ERROR] " + ex.ToString());
-                            this.Invoke(() => AddLog($"[RDP COPY ERROR] {name}: {ex.Message}"));
-                        }
-
-                        this.Invoke(() => progressBar.Value++);
+                        // postpone copying RDP until the unified installer scheduler so progress counts consistently
+                        rdpFiles.Add(file);
                         continue;
                     }
 
@@ -125,12 +158,12 @@ namespace AutoInstallerApp
                         highRisk.Add(file);
                 }
 
-                return (lowRisk, mediumRisk, highRisk);
+                return (lowRisk, mediumRisk, highRisk, rdpFiles);
             });
-
             var lowRisk = classification.lowRisk;
             var mediumRisk = classification.mediumRisk;
             var highRisk = classification.highRisk;
+            var rdpFilesList = classification.rdpFiles;
 
             AddLog($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
             Logger.Write($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
@@ -138,9 +171,25 @@ namespace AutoInstallerApp
             AddLog("Starting installations...");
             Logger.Write("Starting installations...");
 
+            // Reset scheduling info
+            InstallerService.ResetSchedule();
+
             try
             {
-                await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, AddLog, cancelToken.Token);
+                Action<int> progressCallback = (current) =>
+                {
+                    try
+                    {
+                        this.Invoke((Delegate)(() =>
+                        {
+                            try { progressBar.Value = Math.Min(current, progressBar.Maximum); } catch { }
+                            try { progressBarlbl.Text = current.ToString() + "%"; } catch { }
+                        }));
+                    }
+                    catch { }
+                };
+
+                await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, installers.Length, AddLog, progressCallback, cancelToken.Token);
             }
             catch (OperationCanceledException)
             {
@@ -150,11 +199,33 @@ namespace AutoInstallerApp
             AddLog("=== ALL INSTALLATIONS COMPLETE ===");
             Logger.Write("=== ALL INSTALLATIONS COMPLETE ===");
 
+            // Show execution schedule: which installers started in parallel and which were postponed
+            AddLog("[SCHEDULE] Started order:");
+            Logger.Write("[SCHEDULE] Started order:");
+            foreach (var s in InstallerService.StartedOrder)
+            {
+                var name = Path.GetFileName(s);
+                AddLog($"  {name}");
+                Logger.Write($"  {name}");
+            }
+
+            AddLog("[SCHEDULE] Postponed order:");
+            Logger.Write("[SCHEDULE] Postponed order:");
+            foreach (var p in InstallerService.PostponedOrder)
+            {
+                var name = Path.GetFileName(p);
+                AddLog($"  {name}");
+                Logger.Write($"  {name}");
+            }
+
             // === UI: Restaurar botones ===
             btnStart.Visible = true;
             btnStop.Visible = false;
-            isInstalling = false;
+            btnSkip.Visible = false;
             cancelToken = null;
+
+            // Stop elapsed timer (keep final elapsed value visible)
+            try { uiTimer.Stop(); } catch { }
         }
 
         private void btnOpenLog_Click(object sender, EventArgs e)
@@ -165,6 +236,47 @@ namespace AutoInstallerApp
                 Process.Start(new ProcessStartInfo(logPath) { UseShellExecute = true });
             else
                 MessageBox.Show($"The log file does not exist yet. Expected at:\n{logPath}");
+        }
+
+        private void btnSkip_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                var current = InstallerService.CurrentFile;
+                if (string.IsNullOrEmpty(current))
+                {
+                    MessageBox.Show("No installer is currently running.");
+                    return;
+                }
+
+                // Request skip and, if there is a running process, kill it immediately so the next installer starts
+                InstallerService.SkipRequests.Add(current);
+                AddLog($"[SKIP REQUESTED] {Path.GetFileName(current)} - will run at the end");
+
+                try
+                {
+                    lock (InstallerService.ProcessLock)
+                    {
+                        var proc = InstallerService.CurrentProcess;
+                        if (proc != null && !proc.HasExited)
+                        {
+                            try { proc.Kill(); AddLog($"[SKIP] Killed process {proc.ProcessName} (PID {proc.Id})"); } catch (Exception ex) { Logger.Write("[SKIP KILL ERROR] " + ex.ToString()); }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Write("[SKIP KILL ERROR] " + ex.ToString());
+                }
+
+                // Disable skip button until next installer appears
+                try { btnSkip.Enabled = false; } catch { }
+            }
+            catch (Exception ex)
+            {
+                Logger.Write("[SKIP ERROR] " + ex.ToString());
+                MessageBox.Show("Failed to request skip: " + ex.Message);
+            }
         }
 
         private void AddLog(string message)
@@ -186,7 +298,18 @@ namespace AutoInstallerApp
 
             btnStop.Visible = false;
             btnStart.Visible = true;
-            isInstalling = false;
+            btnSkip.Visible = false;
+
+            // Kill all active installer processes started by the app
+            try
+            {
+                InstallerService.KillAllActiveProcesses();
+                AddLog("[STOP] Killed all active installer processes.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Write("[STOP KILL ERROR] " + ex.ToString());
+            }
         }
     }
 }

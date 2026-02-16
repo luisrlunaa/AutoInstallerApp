@@ -24,10 +24,14 @@ namespace AutoInstallerApp
             listLog = new ListBox();
             progressBar = new ProgressBar();
             btnOpenLog = new Button();
+            btnSkip = new Button();
             label1 = new Label();
             label2 = new Label();
             btnStop = new Button();
             pictureBox1 = new PictureBox();
+            lblTimer = new Label();
+            lblProgress = new Label();
+            progressBarlbl = new Label();
             ((System.ComponentModel.ISupportInitialize)pictureBox1).BeginInit();
             SuspendLayout();
             // 
@@ -72,6 +76,16 @@ namespace AutoInstallerApp
             btnOpenLog.UseVisualStyleBackColor = true;
             btnOpenLog.Click += btnOpenLog_Click;
             // 
+            // btnSkip
+            // 
+            btnSkip.Location = new Point(270, 73);
+            btnSkip.Name = "btnSkip";
+            btnSkip.Size = new Size(172, 30);
+            btnSkip.TabIndex = 10;
+            btnSkip.Text = "Skip and run later";
+            btnSkip.UseVisualStyleBackColor = true;
+            btnSkip.Click += btnSkip_Click;
+            // 
             // label1
             // 
             label1.AutoSize = true;
@@ -96,7 +110,7 @@ namespace AutoInstallerApp
             // 
             btnStop.Location = new Point(12, 73);
             btnStop.Name = "btnStop";
-            btnStop.Size = new Size(430, 30);
+            btnStop.Size = new Size(213, 30);
             btnStop.TabIndex = 8;
             btnStop.Text = "Stop Installation";
             btnStop.UseVisualStyleBackColor = true;
@@ -112,13 +126,45 @@ namespace AutoInstallerApp
             pictureBox1.TabIndex = 9;
             pictureBox1.TabStop = false;
             // 
+            // lblTimer
+            // 
+            lblTimer.AutoSize = true;
+            lblTimer.Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point, 0);
+            lblTimer.Location = new Point(393, 9);
+            lblTimer.Name = "lblTimer";
+            lblTimer.Size = new Size(49, 15);
+            lblTimer.TabIndex = 11;
+            lblTimer.Text = "00:00:00";
+            // 
+            // lblProgress
+            // 
+            lblProgress.Location = new Point(0, 0);
+            lblProgress.Name = "lblProgress";
+            lblProgress.Size = new Size(100, 23);
+            lblProgress.TabIndex = 0;
+            // 
+            // progressBarlbl
+            // 
+            progressBarlbl.AutoSize = true;
+            progressBarlbl.BackColor = Color.Transparent;
+            progressBarlbl.FlatStyle = FlatStyle.Flat;
+            progressBarlbl.Font = new Font("Segoe UI", 9F, FontStyle.Bold, GraphicsUnit.Point, 0);
+            progressBarlbl.Location = new Point(254, 118);
+            progressBarlbl.Name = "progressBarlbl";
+            progressBarlbl.Size = new Size(24, 15);
+            progressBarlbl.TabIndex = 12;
+            progressBarlbl.Text = "0%";
+            // 
             // Form1
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
             ClientSize = new Size(592, 449);
+            Controls.Add(progressBarlbl);
             Controls.Add(pictureBox1);
             Controls.Add(btnStop);
+            Controls.Add(btnSkip);
+            Controls.Add(lblTimer);
             Controls.Add(label2);
             Controls.Add(label1);
             Controls.Add(btnOpenLog);
@@ -145,5 +191,9 @@ namespace AutoInstallerApp
         private Label label2;
         private Button btnStop;
         private PictureBox pictureBox1;
+        private Button btnSkip;
+        private Label lblTimer;
+        private Label progressBarlbl;
+        private Label lblProgress;
     }
 }

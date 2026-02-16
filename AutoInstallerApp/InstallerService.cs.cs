@@ -1,15 +1,56 @@
-﻿using System;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
 
 namespace AutoInstallerApp
 {
     public static class InstallerService
     {
+        // Current running or next-to-run installer file (may be set by InstallAllAsync)
+        public static string? CurrentFile;
+
+        // Files requested to be skipped now and run at the end
+        public static ConcurrentBag<string> SkipRequests = new ConcurrentBag<string>();
+        // Current process being run for the CurrentFile (set inside RunInstaller)
+        public static Process? CurrentProcess;
+        public static readonly object ProcessLock = new object();
+        // All active processes started by the installer (concurrent)
+        public static ConcurrentDictionary<int, Process> ActiveProcesses = new ConcurrentDictionary<int, Process>();
+
+        // Execution scheduling information
+        public static ConcurrentQueue<string> StartedOrder = new ConcurrentQueue<string>();
+        public static ConcurrentQueue<string> PostponedOrder = new ConcurrentQueue<string>();
+        // Track which files have been completed (counted for progress)
+        public static ConcurrentDictionary<string, bool> Completed = new ConcurrentDictionary<string, bool>();
+
+        public static void ResetSchedule()
+        {
+            StartedOrder = new ConcurrentQueue<string>();
+            PostponedOrder = new ConcurrentQueue<string>();
+            Completed = new ConcurrentDictionary<string, bool>();
+            ActiveProcesses = new ConcurrentDictionary<int, Process>();
+        }
+
+        // Kill and remove all active processes
+        public static void KillAllActiveProcesses()
+        {
+            foreach (var kv in ActiveProcesses.ToArray())
+            {
+                try
+                {
+                    var proc = kv.Value;
+                    if (proc != null && !proc.HasExited)
+                    {
+                        try { proc.Kill(); } catch { }
+                    }
+                }
+                catch { }
+                finally
+                {
+                    ActiveProcesses.TryRemove(kv.Key, out _);
+                }
+            }
+        }
+
         public enum RiskLevel
         {
             LowRisk,
@@ -45,9 +86,24 @@ namespace AutoInstallerApp
             if (mediumRiskKeywords.Any(k => name.Contains(k)))
                 return RiskLevel.MediumRisk;
 
+            // Read only the first part of the file to detect installer engine strings (faster for large exes)
             string content = string.Empty;
-            try { content = File.ReadAllText(file); }
-            catch { return RiskLevel.MediumRisk; }
+            try
+            {
+                const int maxRead = 64 * 1024; // 64 KB
+                byte[] buffer = new byte[maxRead];
+
+                using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
+                {
+                    int read = fs.Read(buffer, 0, maxRead);
+                    content = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
+                }
+            }
+            catch
+            {
+                // If we can't read the file quickly, assume medium risk
+                return RiskLevel.MediumRisk;
+            }
 
             if (content.Contains("Inno Setup") ||
                 content.Contains("Nullsoft") ||
@@ -64,52 +120,180 @@ namespace AutoInstallerApp
             List<string> lowRisk,
             List<string> mediumRisk,
             List<string> highRisk,
+            List<string> rdpFiles,
+            int originalTotalFiles,
             Action<string> logCallback,
+            Action<int>? progressCallback,
             CancellationToken token)
         {
-            if (lowRisk.Count > 0)
+            // Merge all installers so we attempt to start them all in parallel.
+            var all = new List<string>(lowRisk.Count + mediumRisk.Count + highRisk.Count + rdpFiles.Count);
+            all.AddRange(lowRisk);
+            all.AddRange(mediumRisk);
+            all.AddRange(highRisk);
+            // Include the rdp copy steps as items to process so progress counts them
+            all.AddRange(rdpFiles);
+
+            if (all.Count == 0)
             {
-                logCallback("[INFO] Starting LOW-RISK installers in parallel...");
-
-                var parallelOptions = new ParallelOptions
-                {
-                    MaxDegreeOfParallelism = 3,
-                    CancellationToken = token
-                };
-
-                await Task.Run(() =>
-                {
-                    Parallel.ForEach(lowRisk, parallelOptions, file =>
-                    {
-                        if (!token.IsCancellationRequested)
-                            InstallAsync(file, logCallback, token).Wait();
-                    });
-                });
+                logCallback("[INFO] No installers to run.");
+                return;
             }
 
-            if (mediumRisk.Count > 0)
-            {
-                logCallback("[INFO] Starting MEDIUM-RISK installers sequentially...");
+            logCallback("[INFO] Starting ALL installers in parallel (conflicts will be postponed)...");
 
-                foreach (string file in mediumRisk)
+            var parallelOptions = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = 3,
+                CancellationToken = token
+            };
+
+            var failed = new ConcurrentBag<string>();
+            var postponed = new ConcurrentBag<string>();
+            int progressCount = 0;
+            int totalItems = all.Count; // now includes rdp copy actions
+            if (totalItems == 0) totalItems = 1;
+
+            await Task.Run(() =>
+            {
+                Parallel.ForEach(all, parallelOptions, file =>
                 {
                     if (token.IsCancellationRequested)
                         return;
 
-                    await InstallAsync(file, logCallback, token);
+                    // Publish current file so UI can request skip
+                    CurrentFile = file;
+                    StartedOrder.Enqueue(file);
+                    // Record start order
+                    // (progress is counted when an installer finishes)
+
+                    // If user requested skip for this file, postpone it to run at the end
+                    if (SkipRequests.Contains(file))
+                    {
+                        postponed.Add(file);
+                        PostponedOrder.Enqueue(file);
+                        logCallback($"[POSTPONED] {Path.GetFileName(file)}");
+                        // If this is an RDP file, perform the copy now (it was added as an item)
+                        if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                                string dest = Path.Combine(desktop, Path.GetFileName(file));
+                                File.Copy(file, dest, true);
+                                logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
+                            }
+                            catch (Exception ex)
+                            {
+                                logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
+                            }
+                            // count this as completed item
+                            if (Completed.TryAdd(file, true))
+                            {
+                                var completedCount = Interlocked.Increment(ref progressCount);
+                                int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                                try { progressCallback?.Invoke(percent); } catch { }
+                            }
+                        }
+                        return;
+                    }
+
+                    // If another installer is already active, postpone this one instead of waiting
+                    if (IsAnotherInstallerRunning())
+                    {
+                        postponed.Add(file);
+                        PostponedOrder.Enqueue(file);
+                        logCallback($"[CONFLICT] Another installer active - postponing {Path.GetFileName(file)}");
+                        // conflict/postpone — no progress change now (if RDP, copy later when processed)
+                        return;
+                    }
+
+                    bool ok = false;
+                    try
+                    {
+                        ok = InstallAsync(file, logCallback, token).GetAwaiter().GetResult();
+                    }
+                    catch
+                    {
+                        ok = false;
+                    }
+
+                    if (!ok)
+                        failed.Add(file);
+                    else
+                    {
+                        // If this was an RDP entry, perform the copy as the 'action' of the item
+                        if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                                string dest = Path.Combine(desktop, Path.GetFileName(file));
+                                File.Copy(file, dest, true);
+                                logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
+                            }
+                            catch (Exception ex)
+                            {
+                                logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
+                            }
+                        }
+
+                        // mark completed only once and update progress as percentage
+                        if (Completed.TryAdd(file, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            // compute percentage = 100 * completedCount / totalItems
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
+                    }
+                });
+            });
+
+            if (!failed.IsEmpty)
+            {
+                logCallback($"[INFO] {failed.Count} installers failed during parallel run. Retrying sequentially...");
+
+                foreach (var f in failed)
+                {
+                    if (token.IsCancellationRequested)
+                        break;
+
+                    // If user requested skip for this file, postpone instead of retrying now
+                    if (SkipRequests.Contains(f))
+                    {
+                        postponed.Add(f);
+                        continue;
+                    }
+
+                    // Sequential retry: InstallAsync will attempt elevation if needed
+                    await InstallAsync(f, logCallback, token);
+                    if (Completed.TryAdd(f, true))
+                    {
+                        var completedCount = Interlocked.Increment(ref progressCount);
+                        int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                        try { progressCallback?.Invoke(percent); } catch { }
+                    }
                 }
             }
 
-            if (highRisk.Count > 0)
+            // After retries, run postponed files sequentially
+            if (!postponed.IsEmpty)
             {
-                logCallback("[INFO] Starting HIGH-RISK installers sequentially...");
+                logCallback($"[INFO] Running {postponed.Count} postponed installers sequentially...");
 
-                foreach (string file in highRisk)
+                foreach (var p in postponed)
                 {
                     if (token.IsCancellationRequested)
-                        return;
+                        break;
 
-                    await InstallAsync(file, logCallback, token);
+                    await InstallAsync(p, logCallback, token);
+                    if (Completed.TryAdd(p, true))
+                    {
+                        var completedCount = Interlocked.Increment(ref progressCount);
+                        int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                        try { progressCallback?.Invoke(percent); } catch { }
+                    }
                 }
             }
         }
@@ -117,40 +301,44 @@ namespace AutoInstallerApp
         // ============================
         // INSTALAR UN SOLO ARCHIVO
         // ============================
-        public static async Task InstallAsync(string file, Action<string> logCallback, CancellationToken token)
+        public static async Task<bool> InstallAsync(string file, Action<string> logCallback, CancellationToken token)
         {
-            await Task.Run(() =>
+            return await Task.Run(() =>
             {
                 if (token.IsCancellationRequested)
-                    return;
+                    return false;
 
                 string name = Path.GetFileName(file);
                 logCallback($"[INSTALLING] {name}");
 
                 try
                 {
-                    WaitForInstallerToBeFree(logCallback, token);
-
+                    // Do not wait here to avoid serializing installers. Conflict detection is handled by the caller
                     if (token.IsCancellationRequested)
-                        return;
+                        return false;
 
                     bool success = RunInstaller(file, logCallback, elevated: false, token);
 
                     if (!success && !token.IsCancellationRequested)
                     {
                         logCallback($"[INFO] Retrying with administrator privileges: {name}");
-                        WaitForInstallerToBeFree(logCallback, token);
 
                         if (!token.IsCancellationRequested)
-                            RunInstaller(file, logCallback, elevated: true, token);
+                        {
+                            bool elevatedSuccess = RunInstaller(file, logCallback, elevated: true, token);
+                            success = elevatedSuccess || success;
+                        }
                     }
 
                     if (!token.IsCancellationRequested)
                         logCallback($"[DONE] {name}");
+
+                    return success;
                 }
                 catch (Exception ex)
                 {
                     logCallback($"[EXCEPTION] {file}: {ex.Message}");
+                    return false;
                 }
             });
         }
@@ -215,7 +403,9 @@ namespace AutoInstallerApp
                 {
                     "chrome", "firefox", "edge", "anydesk",
                     "teamviewer", "zoom", "acro", "reader",
-                    "java", "jre", "winrar"
+                    "java", "jre", "winrar",
+                    // Sophos installer does not accept generic /silent switches
+                    "sophos", "sophosinstall", "sophossetup"
                 };
 
                 // ============================
@@ -234,20 +424,37 @@ namespace AutoInstallerApp
                     if (elevated)
                         office.StartInfo.Verb = "runas";
 
-                    office.Start();
-
-                    while (!office.HasExited)
+                    try
                     {
-                        if (token.IsCancellationRequested)
+                        lock (ProcessLock) { CurrentProcess = office; }
+                        office.Start();
+                        ActiveProcesses.TryAdd(office.Id, office);
+
+                        while (!office.HasExited)
                         {
-                            try { office.Kill(); } catch { }
-                            return false;
+                            if (token.IsCancellationRequested)
+                            {
+                                try { office.Kill(); } catch { }
+                                return false;
+                            }
+
+                            // If user requested skip for this file, stop the running process
+                            if (SkipRequests.Contains(file))
+                            {
+                                try { office.Kill(); } catch { }
+                                return false;
+                            }
+
+                            Thread.Sleep(200);
                         }
 
-                        Thread.Sleep(200);
+                        return office.ExitCode == 0;
                     }
-
-                    return office.ExitCode == 0;
+                    finally
+                    {
+                        try { ActiveProcesses.TryRemove(office.Id, out _); } catch { }
+                        lock (ProcessLock) { if (CurrentProcess == office) CurrentProcess = null; }
+                    }
                 }
 
                 // ============================
@@ -289,20 +496,37 @@ namespace AutoInstallerApp
                 if (elevated)
                     process.StartInfo.Verb = "runas";
 
-                process.Start();
-
-                while (!process.HasExited)
+                try
                 {
-                    if (token.IsCancellationRequested)
+                    lock (ProcessLock) { CurrentProcess = process; }
+                    process.Start();
+                    ActiveProcesses.TryAdd(process.Id, process);
+
+                    while (!process.HasExited)
                     {
-                        try { process.Kill(); } catch { }
-                        return false;
+                        if (token.IsCancellationRequested)
+                        {
+                            try { process.Kill(); } catch { }
+                            return false;
+                        }
+
+                        // If user requested skip for this file, stop the running process
+                        if (SkipRequests.Contains(file))
+                        {
+                            try { process.Kill(); } catch { }
+                            return false;
+                        }
+
+                        Thread.Sleep(200);
                     }
 
-                    Thread.Sleep(200);
+                    return process.ExitCode == 0;
                 }
-
-                return process.ExitCode == 0;
+                finally
+                {
+                    try { ActiveProcesses.TryRemove(process.Id, out _); } catch { }
+                    lock (ProcessLock) { if (CurrentProcess == process) CurrentProcess = null; }
+                }
             }
             catch (System.ComponentModel.Win32Exception ex)
             {

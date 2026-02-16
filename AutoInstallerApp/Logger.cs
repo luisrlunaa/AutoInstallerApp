@@ -1,7 +1,4 @@
-﻿using System;
-using System.IO;
-
-namespace AutoInstallerApp
+﻿namespace AutoInstallerApp
 {
     public static class Logger
     {
@@ -23,7 +20,7 @@ namespace AutoInstallerApp
                 string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
                 File.AppendAllText(LogPath, line + Environment.NewLine);
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 MessageBox.Show("Swallow any logging errors to avoid crashing the app when logging isn't possible: => ", ex.Message);
             }
