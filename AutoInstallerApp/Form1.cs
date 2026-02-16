@@ -19,7 +19,7 @@ namespace AutoInstallerApp
             }
 
             // Ensure STOP hidden initially
-            try { btnStop.Visible = false; btnSkip.Visible = false; } catch { }
+            try { btnStop.Visible = false; } catch { }
 
             // Ensure progress label starts at 0% and is visible in front of the progress bar
             try
@@ -102,7 +102,6 @@ namespace AutoInstallerApp
             // === UI: Cambiar botones ===
             btnStart.Visible = false;
             btnStop.Visible = true;
-            btnSkip.Visible = true;
 
             // Start elapsed timer — reset only if label currently has a non-zero value
             try
@@ -190,6 +189,7 @@ namespace AutoInstallerApp
                 };
 
                 await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, installers.Length, AddLog, progressCallback, cancelToken.Token);
+                // Unsubscribe after run (no skip button in this UI version)
             }
             catch (OperationCanceledException)
             {
@@ -221,7 +221,6 @@ namespace AutoInstallerApp
             // === UI: Restaurar botones ===
             btnStart.Visible = true;
             btnStop.Visible = false;
-            btnSkip.Visible = false;
             cancelToken = null;
 
             // Stop elapsed timer (keep final elapsed value visible)
@@ -237,47 +236,7 @@ namespace AutoInstallerApp
             else
                 MessageBox.Show($"The log file does not exist yet. Expected at:\n{logPath}");
         }
-
-        private void btnSkip_Click(object sender, EventArgs e)
-        {
-            try
-            {
-                var current = InstallerService.CurrentFile;
-                if (string.IsNullOrEmpty(current))
-                {
-                    MessageBox.Show("No installer is currently running.");
-                    return;
-                }
-
-                // Request skip and, if there is a running process, kill it immediately so the next installer starts
-                InstallerService.SkipRequests.Add(current);
-                AddLog($"[SKIP REQUESTED] {Path.GetFileName(current)} - will run at the end");
-
-                try
-                {
-                    lock (InstallerService.ProcessLock)
-                    {
-                        var proc = InstallerService.CurrentProcess;
-                        if (proc != null && !proc.HasExited)
-                        {
-                            try { proc.Kill(); AddLog($"[SKIP] Killed process {proc.ProcessName} (PID {proc.Id})"); } catch (Exception ex) { Logger.Write("[SKIP KILL ERROR] " + ex.ToString()); }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Write("[SKIP KILL ERROR] " + ex.ToString());
-                }
-
-                // Disable skip button until next installer appears
-                try { btnSkip.Enabled = false; } catch { }
-            }
-            catch (Exception ex)
-            {
-                Logger.Write("[SKIP ERROR] " + ex.ToString());
-                MessageBox.Show("Failed to request skip: " + ex.Message);
-            }
-        }
+        
 
         private void AddLog(string message)
         {
@@ -298,13 +257,14 @@ namespace AutoInstallerApp
 
             btnStop.Visible = false;
             btnStart.Visible = true;
-            btnSkip.Visible = false;
 
             // Kill all active installer processes started by the app
             try
             {
                 InstallerService.KillAllActiveProcesses();
                 AddLog("[STOP] Killed all active installer processes.");
+                // Stop elapsed timer (keep final elapsed value visible)
+                try { uiTimer.Stop(); } catch { }
             }
             catch (Exception ex)
             {

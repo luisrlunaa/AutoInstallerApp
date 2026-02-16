@@ -24,7 +24,6 @@ namespace AutoInstallerApp
             listLog = new ListBox();
             progressBar = new ProgressBar();
             btnOpenLog = new Button();
-            btnSkip = new Button();
             label1 = new Label();
             label2 = new Label();
             btnStop = new Button();
@@ -76,16 +75,6 @@ namespace AutoInstallerApp
             btnOpenLog.UseVisualStyleBackColor = true;
             btnOpenLog.Click += btnOpenLog_Click;
             // 
-            // btnSkip
-            // 
-            btnSkip.Location = new Point(270, 73);
-            btnSkip.Name = "btnSkip";
-            btnSkip.Size = new Size(172, 30);
-            btnSkip.TabIndex = 10;
-            btnSkip.Text = "Skip and run later";
-            btnSkip.UseVisualStyleBackColor = true;
-            btnSkip.Click += btnSkip_Click;
-            // 
             // label1
             // 
             label1.AutoSize = true;
@@ -110,7 +99,7 @@ namespace AutoInstallerApp
             // 
             btnStop.Location = new Point(12, 73);
             btnStop.Name = "btnStop";
-            btnStop.Size = new Size(213, 30);
+            btnStop.Size = new Size(430, 30);
             btnStop.TabIndex = 8;
             btnStop.Text = "Stop Installation";
             btnStop.UseVisualStyleBackColor = true;
@@ -163,7 +152,6 @@ namespace AutoInstallerApp
             Controls.Add(progressBarlbl);
             Controls.Add(pictureBox1);
             Controls.Add(btnStop);
-            Controls.Add(btnSkip);
             Controls.Add(lblTimer);
             Controls.Add(label2);
             Controls.Add(label1);
@@ -191,7 +179,7 @@ namespace AutoInstallerApp
         private Label label2;
         private Button btnStop;
         private PictureBox pictureBox1;
-        private Button btnSkip;
+        // btnSkip removed
         private Label lblTimer;
         private Label progressBarlbl;
         private Label lblProgress;

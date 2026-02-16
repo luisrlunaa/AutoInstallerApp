@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Diagnostics;
+using Microsoft.Win32;
 
 namespace AutoInstallerApp
 {
@@ -7,9 +8,6 @@ namespace AutoInstallerApp
     {
         // Current running or next-to-run installer file (may be set by InstallAllAsync)
         public static string? CurrentFile;
-
-        // Files requested to be skipped now and run at the end
-        public static ConcurrentBag<string> SkipRequests = new ConcurrentBag<string>();
         // Current process being run for the CurrentFile (set inside RunInstaller)
         public static Process? CurrentProcess;
         public static readonly object ProcessLock = new object();
@@ -28,6 +26,63 @@ namespace AutoInstallerApp
             PostponedOrder = new ConcurrentQueue<string>();
             Completed = new ConcurrentDictionary<string, bool>();
             ActiveProcesses = new ConcurrentDictionary<int, Process>();
+        }
+
+        // Heuristic: detect if the program corresponding to the file is already installed
+        private static bool IsProgramInstalled(string file)
+        {
+            try
+            {
+                string name = Path.GetFileNameWithoutExtension(file).ToLower();
+
+                // Check common uninstall registry keys for a matching display name
+                string[] roots = new[] {
+                    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+                    "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+                };
+
+                foreach (var root in roots)
+                {
+                    using (var key = Registry.LocalMachine.OpenSubKey(root))
+                    {
+                        if (key == null) continue;
+
+                        foreach (var sub in key.GetSubKeyNames())
+                        {
+                            try
+                            {
+                                using var sk = key.OpenSubKey(sub);
+                                var displayName = (sk?.GetValue("DisplayName") as string) ?? string.Empty;
+                                if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(name))
+                                    return true;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                // Also check current user uninstall area
+                using (var key = Registry.CurrentUser.OpenSubKey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"))
+                {
+                    if (key != null)
+                    {
+                        foreach (var sub in key.GetSubKeyNames())
+                        {
+                            try
+                            {
+                                using var sk = key.OpenSubKey(sub);
+                                var displayName = (sk?.GetValue("DisplayName") as string) ?? string.Empty;
+                                if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(name))
+                                    return true;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                return false;
+            }
+            catch { return false; }
         }
 
         // Kill and remove all active processes
@@ -50,6 +105,7 @@ namespace AutoInstallerApp
                 }
             }
         }
+
 
         public enum RiskLevel
         {
@@ -166,37 +222,25 @@ namespace AutoInstallerApp
                     StartedOrder.Enqueue(file);
                     // Record start order
                     // (progress is counted when an installer finishes)
-
-                    // If user requested skip for this file, postpone it to run at the end
-                    if (SkipRequests.Contains(file))
+                    // If program appears already installed, skip it
+                    try
                     {
-                        postponed.Add(file);
-                        PostponedOrder.Enqueue(file);
-                        logCallback($"[POSTPONED] {Path.GetFileName(file)}");
-                        // If this is an RDP file, perform the copy now (it was added as an item)
-                        if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                        if (IsProgramInstalled(file))
                         {
-                            try
-                            {
-                                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                                string dest = Path.Combine(desktop, Path.GetFileName(file));
-                                File.Copy(file, dest, true);
-                                logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
-                            }
-                            catch (Exception ex)
-                            {
-                                logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
-                            }
-                            // count this as completed item
+                            var name = Path.GetFileName(file);
+                            logCallback($"[SKIPPED - ALREADY INSTALLED] {name}");
                             if (Completed.TryAdd(file, true))
                             {
                                 var completedCount = Interlocked.Increment(ref progressCount);
                                 int percent = (int)Math.Round(100.0 * completedCount / totalItems);
                                 try { progressCallback?.Invoke(percent); } catch { }
                             }
+                            return;
                         }
-                        return;
                     }
+                    catch { }
+
+                    // If user requested skip for this file: skipping feature removed — continue normal flow
 
                     // If another installer is already active, postpone this one instead of waiting
                     if (IsAnotherInstallerRunning())
@@ -205,6 +249,31 @@ namespace AutoInstallerApp
                         PostponedOrder.Enqueue(file);
                         logCallback($"[CONFLICT] Another installer active - postponing {Path.GetFileName(file)}");
                         // conflict/postpone — no progress change now (if RDP, copy later when processed)
+                        return;
+                    }
+
+                    // Handle RDP copy items directly (do not try to run them as installers)
+                    if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                            string dest = Path.Combine(desktop, Path.GetFileName(file));
+                            File.Copy(file, dest, true);
+                            logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
+                        }
+                        catch (Exception ex)
+                        {
+                            logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
+                        }
+
+                        if (Completed.TryAdd(file, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
+
                         return;
                     }
 
@@ -222,22 +291,6 @@ namespace AutoInstallerApp
                         failed.Add(file);
                     else
                     {
-                        // If this was an RDP entry, perform the copy as the 'action' of the item
-                        if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
-                        {
-                            try
-                            {
-                                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                                string dest = Path.Combine(desktop, Path.GetFileName(file));
-                                File.Copy(file, dest, true);
-                                logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
-                            }
-                            catch (Exception ex)
-                            {
-                                logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
-                            }
-                        }
-
                         // mark completed only once and update progress as percentage
                         if (Completed.TryAdd(file, true))
                         {
@@ -259,20 +312,38 @@ namespace AutoInstallerApp
                     if (token.IsCancellationRequested)
                         break;
 
-                    // If user requested skip for this file, postpone instead of retrying now
-                    if (SkipRequests.Contains(f))
-                    {
-                        postponed.Add(f);
-                        continue;
-                    }
 
                     // Sequential retry: InstallAsync will attempt elevation if needed
-                    await InstallAsync(f, logCallback, token);
-                    if (Completed.TryAdd(f, true))
+                    if (f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                     {
-                        var completedCount = Interlocked.Increment(ref progressCount);
-                        int percent = (int)Math.Round(100.0 * completedCount / totalItems);
-                        try { progressCallback?.Invoke(percent); } catch { }
+                        try
+                        {
+                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                            string dest = Path.Combine(desktop, Path.GetFileName(f));
+                            File.Copy(f, dest, true);
+                            logCallback($"[RDP COPIED] {Path.GetFileName(f)}");
+                        }
+                        catch (Exception ex)
+                        {
+                            logCallback($"[RDP COPY ERROR] {f}: {ex.Message}");
+                        }
+
+                        if (Completed.TryAdd(f, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
+                    }
+                    else
+                    {
+                        await InstallAsync(f, logCallback, token);
+                        if (Completed.TryAdd(f, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
                     }
                 }
             }
@@ -287,12 +358,36 @@ namespace AutoInstallerApp
                     if (token.IsCancellationRequested)
                         break;
 
-                    await InstallAsync(p, logCallback, token);
-                    if (Completed.TryAdd(p, true))
+                    if (p.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                     {
-                        var completedCount = Interlocked.Increment(ref progressCount);
-                        int percent = (int)Math.Round(100.0 * completedCount / totalItems);
-                        try { progressCallback?.Invoke(percent); } catch { }
+                        try
+                        {
+                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                            string dest = Path.Combine(desktop, Path.GetFileName(p));
+                            File.Copy(p, dest, true);
+                            logCallback($"[RDP COPIED] {Path.GetFileName(p)}");
+                        }
+                        catch (Exception ex)
+                        {
+                            logCallback($"[RDP COPY ERROR] {p}: {ex.Message}");
+                        }
+
+                        if (Completed.TryAdd(p, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
+                    }
+                    else
+                    {
+                        await InstallAsync(p, logCallback, token);
+                        if (Completed.TryAdd(p, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
                     }
                 }
             }
@@ -438,12 +533,6 @@ namespace AutoInstallerApp
                                 return false;
                             }
 
-                            // If user requested skip for this file, stop the running process
-                            if (SkipRequests.Contains(file))
-                            {
-                                try { office.Kill(); } catch { }
-                                return false;
-                            }
 
                             Thread.Sleep(200);
                         }
@@ -505,13 +594,6 @@ namespace AutoInstallerApp
                     while (!process.HasExited)
                     {
                         if (token.IsCancellationRequested)
-                        {
-                            try { process.Kill(); } catch { }
-                            return false;
-                        }
-
-                        // If user requested skip for this file, stop the running process
-                        if (SkipRequests.Contains(file))
                         {
                             try { process.Kill(); } catch { }
                             return false;
