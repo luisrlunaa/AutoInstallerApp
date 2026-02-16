@@ -16,8 +16,33 @@ namespace AutoInstallerApp
 
         public Form1()
         {
-            InitializeComponent();
-            btnStop.Visible = false; // Asegurar que STOP esté oculto al inicio
+            try
+            {
+                InitializeComponent();
+            }
+            catch (Exception ex)
+            {
+                try { Logger.Write("[INIT ERROR] " + ex.ToString()); } catch { }
+                throw;
+            }
+
+            // Ensure STOP hidden initially
+            try { btnStop.Visible = false; } catch { }
+
+            this.Load += Form1_Load;
+        }
+
+        private void Form1_Load(object? sender, EventArgs e)
+        {
+            // Load image lazily so startup doesn't block on large resource decoding
+            try
+            {
+                pictureBox1.Image = Properties.Resources.AIA;
+            }
+            catch (Exception ex)
+            {
+                try { Logger.Write("[LOAD IMAGE ERROR] " + ex.ToString()); } catch { }
+            }
         }
 
         private async void btnStart_Click(object sender, EventArgs e)
@@ -55,41 +80,57 @@ namespace AutoInstallerApp
             AddLog("Classifying installers...");
             Logger.Write("Classifying installers...");
 
-            var lowRisk = new List<string>();
-            var mediumRisk = new List<string>();
-            var highRisk = new List<string>();
-
-            foreach (string file in installers)
+            // Run classification on background thread to avoid blocking UI at startup
+            var classification = await Task.Run(() =>
             {
-                if (cancelToken.IsCancellationRequested)
-                    break;
+                var lowRisk = new List<string>();
+                var mediumRisk = new List<string>();
+                var highRisk = new List<string>();
 
-                string name = Path.GetFileName(file);
-
-                // RDP → copiar al escritorio del usuario actual
-                if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                foreach (string file in installers)
                 {
-                    string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                    string dest = Path.Combine(desktop, name);
+                    if (cancelToken.IsCancellationRequested)
+                        break;
 
-                    File.Copy(file, dest, true);
+                    string name = Path.GetFileName(file);
 
-                    AddLog($"[RDP COPIED] {name}");
-                    Logger.Write($"[RDP COPIED] {name}");
+                    if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                            string dest = Path.Combine(desktop, name);
+                            File.Copy(file, dest, true);
+                            // Log from background thread via Logger only; enqueue UI log
+                            Logger.Write($"[RDP COPIED] {name}");
+                            this.Invoke(() => AddLog($"[RDP COPIED] {name}"));
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Write("[RDP COPY ERROR] " + ex.ToString());
+                            this.Invoke(() => AddLog($"[RDP COPY ERROR] {name}: {ex.Message}"));
+                        }
 
-                    progressBar.Value++;
-                    continue;
+                        this.Invoke(() => progressBar.Value++);
+                        continue;
+                    }
+
+                    var level = InstallerService.GetRiskLevel(file);
+
+                    if (level == InstallerService.RiskLevel.LowRisk)
+                        lowRisk.Add(file);
+                    else if (level == InstallerService.RiskLevel.MediumRisk)
+                        mediumRisk.Add(file);
+                    else
+                        highRisk.Add(file);
                 }
 
-                var level = InstallerService.GetRiskLevel(file);
+                return (lowRisk, mediumRisk, highRisk);
+            });
 
-                if (level == InstallerService.RiskLevel.LowRisk)
-                    lowRisk.Add(file);
-                else if (level == InstallerService.RiskLevel.MediumRisk)
-                    mediumRisk.Add(file);
-                else
-                    highRisk.Add(file);
-            }
+            var lowRisk = classification.lowRisk;
+            var mediumRisk = classification.mediumRisk;
+            var highRisk = classification.highRisk;
 
             AddLog($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
             Logger.Write($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
@@ -118,12 +159,12 @@ namespace AutoInstallerApp
 
         private void btnOpenLog_Click(object sender, EventArgs e)
         {
-            string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "installer_log.txt");
+            string logPath = Logger.LogFilePath;
 
             if (File.Exists(logPath))
                 Process.Start(new ProcessStartInfo(logPath) { UseShellExecute = true });
             else
-                MessageBox.Show("The log file does not exist yet.");
+                MessageBox.Show($"The log file does not exist yet. Expected at:\n{logPath}");
         }
 
         private void AddLog(string message)
