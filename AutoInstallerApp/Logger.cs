@@ -2,9 +2,24 @@
 {
     public static class Logger
     {
-        // Use LocalApplicationData so single-file or limited-permissions runs can still write logs
-        private static readonly string LogPath =
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AutoInstallerApp", "installer_log.txt");
+        // Log file placed at the root of the drive where Windows is installed
+        private static readonly string LogPath;
+
+        static Logger()
+        {
+            try
+            {
+                // Get Windows directory (e.g. C:\Windows) and extract its root (e.g. C:\)
+                string windowsDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows) ?? "C:\\";
+                string root = Path.GetPathRoot(windowsDir) ?? "C:\\";
+                LogPath = Path.Combine(root, "AutoInstallerApp", "installer_log.txt");
+            }
+            catch
+            {
+                // Fallback to C:\ if anything fails
+                LogPath = Path.Combine("C:\\", "AutoInstallerApp", "installer_log.txt");
+            }
+        }
 
         // Public accessor for other parts of the app to open the log file
         public static string LogFilePath => LogPath;

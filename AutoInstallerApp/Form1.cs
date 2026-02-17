@@ -75,6 +75,14 @@ namespace AutoInstallerApp
             {
                 try { Logger.Write("[LOAD IMAGE ERROR] " + ex.ToString()); } catch { }
             }
+
+            try
+            {
+                // Initialize checkbox state from InstallerService flag
+                try { chkForceAgent.Checked = InstallerService.ForceUseAgent; } catch { }
+                try { chkForceAgent.CheckedChanged += (s, ev) => { try { InstallerService.ForceUseAgent = chkForceAgent.Checked; } catch { } }; } catch { }
+            }
+            catch { }
         }
 
         private async void btnStart_Click(object sender, EventArgs e)

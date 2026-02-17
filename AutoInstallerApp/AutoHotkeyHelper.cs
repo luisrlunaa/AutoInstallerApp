@@ -1,34 +1,48 @@
-﻿namespace AutoInstallerApp
+﻿
+namespace AutoInstallerApp
 {
     public static class AutoHotkeyHelper
     {
-        public static string CreateAutoHotkeyScript()
+        public static string CreateAutoHotkeyScript(int pid)
         {
-            string ahkPath = Path.Combine(Path.GetTempPath(), "auto_installer.ahk");
+            string ahkPath = Path.Combine(Path.GetTempPath(), "auto_installer_dynamic.ahk");
 
             string script = @"
 #NoTrayIcon
 SetTitleMatchMode, 2
+DetectHiddenWindows, On
+
+targetPID := {pid}
 
 Loop
-{
-    WinWaitActive, Setup
-    ControlClick, Button1, Setup
+{WinGet,id, List,,, Program Manager
+    Loop, %id%
+    {
+        this_id := id%A_Index%
+        WinGet, thisPID, PID, ahk_id %this_id%
 
-    WinWaitActive, Installer
-    ControlClick, Button1, Installer
+        if (thisPID = targetPID)
+        {
+            WinActivate, ahk_id %this_id%
+            Sleep, 300
 
-    WinWaitActive, Installation
-    ControlClick, Button1, Installation
+            ; Buscar botones por texto común
+            buttons := [""Next"", ""Siguiente"", ""Install"", ""Instalar"", ""Finish"", ""Aceptar"", ""OK"", ""Continuar"", ""Yes"", ""Close""]
 
-    WinWaitActive, Next
-    ControlClick, Button1, Next
+            for index, label in buttons
+            {
+                ControlClick, %label%, ahk_id %this_id%
+                Sleep, 200
+            }
 
-    WinWaitActive, Siguiente
-    ControlClick, Button1, Siguiente
-
-    WinWaitActive, Finish
-    ControlClick, Button1, Finish
+            ; Click por coordenadas si no hay controles
+            ControlGetPos, x, y, w, h, , ahk_id %this_id%
+            if (w > 0 and h > 0)
+            {
+                Click, % (x + w - 80) % , % (y + h - 40)
+            }
+        }
+    }
 
     Sleep, 500
 }

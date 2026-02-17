@@ -24,6 +24,7 @@ namespace AutoInstallerApp
             listLog = new ListBox();
             progressBar = new ProgressBar();
             btnOpenLog = new Button();
+            chkForceAgent = new CheckBox();
             label1 = new Label();
             label2 = new Label();
             btnStop = new Button();
@@ -74,6 +75,15 @@ namespace AutoInstallerApp
             btnOpenLog.Text = "Open log file";
             btnOpenLog.UseVisualStyleBackColor = true;
             btnOpenLog.Click += btnOpenLog_Click;
+            // 
+            // chkForceAgent
+            // 
+            chkForceAgent.Location = new Point(200, 388);
+            chkForceAgent.Name = "chkForceAgent";
+            chkForceAgent.Size = new Size(220, 30);
+            chkForceAgent.TabIndex = 13;
+            chkForceAgent.Text = "Always use elevated agent";
+            chkForceAgent.UseVisualStyleBackColor = true;
             // 
             // label1
             // 
@@ -157,6 +167,7 @@ namespace AutoInstallerApp
             Controls.Add(label1);
             Controls.Add(btnOpenLog);
             Controls.Add(listLog);
+            Controls.Add(chkForceAgent);
             Controls.Add(progressBar);
             Controls.Add(btnStart);
             Controls.Add(txtFolder);
@@ -183,5 +194,6 @@ namespace AutoInstallerApp
         private Label lblTimer;
         private Label progressBarlbl;
         private Label lblProgress;
+        private CheckBox chkForceAgent;
     }
 }

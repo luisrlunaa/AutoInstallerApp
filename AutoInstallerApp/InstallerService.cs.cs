@@ -10,6 +10,10 @@ namespace AutoInstallerApp
         public static string? CurrentFile;
         // Current process being run for the CurrentFile (set inside RunInstaller)
         public static Process? CurrentProcess;
+        // Enable or disable the UI automation helper (can be toggled from the UI)
+        public static bool EnableUiAutomation = true;
+        // If true, always launch the elevated helper agent to perform UI automation
+        public static bool ForceUseAgent = true;
         public static readonly object ProcessLock = new object();
         // All active processes started by the installer (concurrent)
         public static ConcurrentDictionary<int, Process> ActiveProcesses = new ConcurrentDictionary<int, Process>();
@@ -33,9 +37,38 @@ namespace AutoInstallerApp
         {
             try
             {
-                string name = Path.GetFileNameWithoutExtension(file).ToLower();
+                string fileName = Path.GetFileName(file) ?? string.Empty;
+                string nameNoExt = Path.GetFileNameWithoutExtension(file)?.ToLower() ?? string.Empty;
 
-                // Check common uninstall registry keys for a matching display name
+                // 1) Check the installation log on disk C: first source of truth
+                try
+                {
+                    var logPath = Logger.LogFilePath; // now points to C:\AutoInstallerApp\installer_log.txt
+                    if (!string.IsNullOrEmpty(logPath) && File.Exists(logPath))
+                    {
+                        var lines = File.ReadAllLines(logPath);
+                        if (lines != null && lines.Length > 0)
+                        {
+                            // Look for explicit success/skipped entries that reference this installer filename
+                            if (lines.Any(l => l.IndexOf($"[DONE] {fileName}", StringComparison.OrdinalIgnoreCase) >= 0
+                                                || l.IndexOf($"[SKIPPED - ALREADY INSTALLED] {fileName}", StringComparison.OrdinalIgnoreCase) >= 0
+                                                || l.IndexOf($"[INSTALLED] {fileName}", StringComparison.OrdinalIgnoreCase) >= 0))
+                            {
+                                return true;
+                            }
+
+                            // Also consider lines that mention the product name (without extension)
+                            if (lines.Any(l => l.IndexOf(nameNoExt, StringComparison.OrdinalIgnoreCase) >= 0
+                                                && (l.IndexOf("[DONE]", StringComparison.OrdinalIgnoreCase) >= 0 || l.IndexOf("[SKIPPED", StringComparison.OrdinalIgnoreCase) >= 0)))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                catch { /* ignore log read errors and continue to registry checks */ }
+
+                // 2) Check common uninstall registry keys for a matching display name
                 string[] roots = new[] {
                     "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
                     "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
@@ -53,7 +86,7 @@ namespace AutoInstallerApp
                             {
                                 using var sk = key.OpenSubKey(sub);
                                 var displayName = (sk?.GetValue("DisplayName") as string) ?? string.Empty;
-                                if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(name))
+                                if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(nameNoExt))
                                     return true;
                             }
                             catch { }
@@ -72,7 +105,7 @@ namespace AutoInstallerApp
                             {
                                 using var sk = key.OpenSubKey(sub);
                                 var displayName = (sk?.GetValue("DisplayName") as string) ?? string.Empty;
-                                if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(name))
+                                if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(nameNoExt))
                                     return true;
                             }
                             catch { }
@@ -410,17 +443,40 @@ namespace AutoInstallerApp
                     // Do not wait here to avoid serializing installers. Conflict detection is handled by the caller
                     if (token.IsCancellationRequested)
                         return false;
-
                     bool success = RunInstaller(file, logCallback, elevated: false, token);
 
+                    // === FALLBACK AHK ===
                     if (!success && !token.IsCancellationRequested)
                     {
-                        logCallback($"[INFO] Retrying with administrator privileges: {name}");
+                        logCallback($"[INFO] FlaUI no logró automatizar {name}. Probando AutoHotkey...");
 
-                        if (!token.IsCancellationRequested)
+                        try
                         {
-                            bool elevatedSuccess = RunInstaller(file, logCallback, elevated: true, token);
-                            success = elevatedSuccess || success;
+                            if (CurrentProcess == null || CurrentProcess.HasExited)
+                            {
+                                logCallback("[AHK] Cannot start AutoHotkey fallback: CurrentProcess is null or exited.");
+                                return false;
+                            }
+
+                            string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id);
+                            Process ahk = Process.Start("AutoHotkey.exe", $"\"{ahkScript}\"");
+
+                            while (!CurrentProcess.HasExited)
+                            {
+                                if (token.IsCancellationRequested)
+                                {
+                                    try { ahk.Kill(); } catch { }
+                                    break;
+                                }
+                                Thread.Sleep(300);
+                            }
+
+                            try { ahk.Kill(); } catch { }
+                            success = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            logCallback($"[AHK ERROR] {ex.Message}");
                         }
                     }
 
@@ -518,23 +574,33 @@ namespace AutoInstallerApp
                     if (elevated)
                         office.StartInfo.Verb = "runas";
 
+                    CancellationTokenSource? automatorCtsOffice = null;
                     try
                     {
                         lock (ProcessLock) { CurrentProcess = office; }
                         office.Start();
                         ActiveProcesses.TryAdd(office.Id, office);
 
+                        try
+                        {
+                            automatorCtsOffice = CancellationTokenSource.CreateLinkedTokenSource(token);
+                            InstallerUiAutomator.InteractWithProcess(office.Id, logCallback, automatorCtsOffice.Token);
+                        }
+                        catch { }
+
                         while (!office.HasExited)
                         {
                             if (token.IsCancellationRequested)
                             {
                                 try { office.Kill(); } catch { }
+                                try { automatorCtsOffice?.Cancel(); } catch { }
                                 return false;
                             }
 
-
                             Thread.Sleep(200);
                         }
+
+                        try { automatorCtsOffice?.Cancel(); } catch { }
 
                         return office.ExitCode == 0;
                     }
@@ -584,22 +650,36 @@ namespace AutoInstallerApp
                 if (elevated)
                     process.StartInfo.Verb = "runas";
 
+                CancellationTokenSource? automatorCts = null;
                 try
                 {
                     lock (ProcessLock) { CurrentProcess = process; }
                     process.Start();
                     ActiveProcesses.TryAdd(process.Id, process);
 
+                    try
+                    {
+                        automatorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        // If this process was started elevated and our process is not elevated, launching a helper
+                        // may be necessary. We still start background automator here; the separate helper exists
+                        // for scenarios where the app can spawn an elevated agent.
+                        InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token);
+                    }
+                    catch { }
+
                     while (!process.HasExited)
                     {
                         if (token.IsCancellationRequested)
                         {
                             try { process.Kill(); } catch { }
+                            try { automatorCts?.Cancel(); } catch { }
                             return false;
                         }
 
                         Thread.Sleep(200);
                     }
+
+                    try { automatorCts?.Cancel(); } catch { }
 
                     return process.ExitCode == 0;
                 }

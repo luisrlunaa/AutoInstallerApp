@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>false</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- El agente SIEMPRE debe ejecutarse elevado -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- No queremos que agregue archivos por defecto -->
+    <EnableDefaultItems>false</EnableDefaultItems>
+  </PropertyGroup>
+
+  <!-- Referencia al proyecto principal -->
+  <ItemGroup>
+    <ProjectReference Include="..\AutoInstallerApp\AutoInstallerApp.csproj" />
+  </ItemGroup>
+
+  <!-- Copiar el agente al output de AutoInstallerApp -->
+  <Target Name="AfterBuild">
+    <PropertyGroup>
+      <AppOutDir>$(MSBuildProjectDirectory)\..\AutoInstallerApp\bin\$(Configuration)\net10.0-windows\</AppOutDir>
+    </PropertyGroup>
+
+    <MakeDir Directories="$(AppOutDir)" Condition="'$(AppOutDir)' != ''" />
+
+    <Copy 
+      SourceFiles="$(TargetPath)" 
+      DestinationFolder="$(AppOutDir)" 
+      SkipUnchangedFiles="true" 
+      ContinueOnError="true" />
+  </Target>
+
+  <!-- Copiar el agente al folder de publish -->
+  <Target Name="AfterPublish" AfterTargets="Publish">
+    <PropertyGroup>
+      <AppPublishDir>$(MSBuildProjectDirectory)\..\AutoInstallerApp\bin\$(Configuration)\net10.0-windows\win-x64\publish\</AppPublishDir>
+    </PropertyGroup>
+
+    <Message Text="Copying AutoInstallerAgent to $(AppPublishDir)" Importance="High" />
+
+    <MakeDir Directories="$(AppPublishDir)" Condition="'$(AppPublishDir)' != ''" />
+
+    <Copy 
+      SourceFiles="$(TargetPath)" 
+      DestinationFolder="$(AppPublishDir)" 
+      SkipUnchangedFiles="true" 
+      ContinueOnError="true" />
+  </Target>
+
+</Project>
