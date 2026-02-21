@@ -24,7 +24,6 @@ namespace AutoInstallerApp
             listLog = new ListBox();
             progressBar = new ProgressBar();
             btnOpenLog = new Button();
-            chkForceAgent = new CheckBox();
             label1 = new Label();
             label2 = new Label();
             btnStop = new Button();
@@ -37,14 +36,14 @@ namespace AutoInstallerApp
             // 
             // txtFolder
             // 
-            txtFolder.Location = new Point(12, 40);
+            txtFolder.Location = new Point(12, 56);
             txtFolder.Name = "txtFolder";
             txtFolder.Size = new Size(430, 23);
             txtFolder.TabIndex = 5;
             // 
             // btnStart
             // 
-            btnStart.Location = new Point(12, 73);
+            btnStart.Location = new Point(12, 89);
             btnStart.Name = "btnStart";
             btnStart.Size = new Size(430, 30);
             btnStart.TabIndex = 3;
@@ -54,21 +53,21 @@ namespace AutoInstallerApp
             // 
             // listLog
             // 
-            listLog.Location = new Point(12, 148);
+            listLog.Location = new Point(12, 168);
             listLog.Name = "listLog";
             listLog.Size = new Size(568, 229);
             listLog.TabIndex = 1;
             // 
             // progressBar
             // 
-            progressBar.Location = new Point(12, 113);
+            progressBar.Location = new Point(12, 133);
             progressBar.Name = "progressBar";
-            progressBar.Size = new Size(568, 25);
+            progressBar.Size = new Size(567, 25);
             progressBar.TabIndex = 2;
             // 
             // btnOpenLog
             // 
-            btnOpenLog.Location = new Point(12, 388);
+            btnOpenLog.Location = new Point(12, 408);
             btnOpenLog.Name = "btnOpenLog";
             btnOpenLog.Size = new Size(172, 30);
             btnOpenLog.TabIndex = 0;
@@ -76,20 +75,11 @@ namespace AutoInstallerApp
             btnOpenLog.UseVisualStyleBackColor = true;
             btnOpenLog.Click += btnOpenLog_Click;
             // 
-            // chkForceAgent
-            // 
-            chkForceAgent.Location = new Point(200, 388);
-            chkForceAgent.Name = "chkForceAgent";
-            chkForceAgent.Size = new Size(220, 30);
-            chkForceAgent.TabIndex = 13;
-            chkForceAgent.Text = "Always use elevated agent";
-            chkForceAgent.UseVisualStyleBackColor = true;
-            // 
             // label1
             // 
             label1.AutoSize = true;
             label1.Font = new Font("Segoe UI", 14.25F, FontStyle.Bold, GraphicsUnit.Point, 0);
-            label1.Location = new Point(12, 9);
+            label1.Location = new Point(12, 25);
             label1.Name = "label1";
             label1.Size = new Size(122, 25);
             label1.TabIndex = 6;
@@ -107,7 +97,7 @@ namespace AutoInstallerApp
             // 
             // btnStop
             // 
-            btnStop.Location = new Point(12, 73);
+            btnStop.Location = new Point(12, 89);
             btnStop.Name = "btnStop";
             btnStop.Size = new Size(430, 30);
             btnStop.TabIndex = 8;
@@ -118,9 +108,9 @@ namespace AutoInstallerApp
             // pictureBox1
             // 
             pictureBox1.Image = Properties.Resources.AIA;
-            pictureBox1.Location = new Point(460, 9);
+            pictureBox1.Location = new Point(459, 9);
             pictureBox1.Name = "pictureBox1";
-            pictureBox1.Size = new Size(120, 98);
+            pictureBox1.Size = new Size(121, 118);
             pictureBox1.SizeMode = PictureBoxSizeMode.Zoom;
             pictureBox1.TabIndex = 9;
             pictureBox1.TabStop = false;
@@ -148,7 +138,7 @@ namespace AutoInstallerApp
             progressBarlbl.BackColor = Color.Transparent;
             progressBarlbl.FlatStyle = FlatStyle.Flat;
             progressBarlbl.Font = new Font("Segoe UI", 9F, FontStyle.Bold, GraphicsUnit.Point, 0);
-            progressBarlbl.Location = new Point(254, 118);
+            progressBarlbl.Location = new Point(254, 138);
             progressBarlbl.Name = "progressBarlbl";
             progressBarlbl.Size = new Size(24, 15);
             progressBarlbl.TabIndex = 12;
@@ -167,7 +157,6 @@ namespace AutoInstallerApp
             Controls.Add(label1);
             Controls.Add(btnOpenLog);
             Controls.Add(listLog);
-            Controls.Add(chkForceAgent);
             Controls.Add(progressBar);
             Controls.Add(btnStart);
             Controls.Add(txtFolder);
@@ -194,6 +183,6 @@ namespace AutoInstallerApp
         private Label lblTimer;
         private Label progressBarlbl;
         private Label lblProgress;
-        private CheckBox chkForceAgent;
+        
     }
 }

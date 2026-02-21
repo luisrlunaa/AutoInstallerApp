@@ -1,13 +1,9 @@
-using System;
-using System.IO;
-using System.Linq;
-using System.Diagnostics;
-using System.Threading;
-using System.Threading.Tasks;
-using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.UIA3;
+using System.Diagnostics;
+using System.Management;
+using System.Runtime.InteropServices;
 
 namespace AutoInstallerApp
 {
@@ -15,9 +11,14 @@ namespace AutoInstallerApp
     {
         private static readonly string[] CommonButtonNames = new[]
         {
-            "next", "siguiente", "install", "instalar", "finish", "done",
-            "close", "ok", "accept", "aceptar", "yes", "si", "continue",
+            "next", "siguiente", "install", "instalar", "ok", "accept", "aceptar", "yes", "si", "continue",
             "continuar", "aceptar y continuar"
+        };
+
+        // Buttons that should only be activated when they are the only meaningful option
+        private static readonly string[] FinalOnlyButtonNames = new[]
+        {
+            "finish", "done", "close"
         };
 
         private static readonly string[] AcceptCheckboxTexts = new[]
@@ -41,13 +42,124 @@ namespace AutoInstallerApp
             "clave del producto", "cd key", "cdkey", "número de serie"
         };
 
-        public static void InteractWithProcess(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs = 120000)
+        public static void InteractWithProcess(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs = 120000, string? processNameHint = null)
         {
-            Task.Run(() => InteractWithProcessAsync(pid, logCallback, token, timeoutMs), token)
-                .ConfigureAwait(false);
+            // Fire-and-forget the async worker; capture the returned Task to avoid analyzer warnings
+            _ = InteractWithProcessAsync(pid, logCallback, token, timeoutMs, processNameHint);
         }
 
-        private static async Task InteractWithProcessAsync(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs)
+        // P/Invoke for SetForegroundWindow and keybd_event as a fallback to send Enter
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        private static void SendEnterToWindow(Window win)
+        {
+            if (win == null) throw new ArgumentNullException(nameof(win));
+
+            IntPtr hWnd = IntPtr.Zero;
+            try
+            {
+                var handleProp = win.Properties.NativeWindowHandle;
+                if (handleProp != null)
+                {
+                    var hv = handleProp.Value;
+                    if (!hv.Equals(default(nint)))
+                    {
+                        int h = Convert.ToInt32(hv);
+                        hWnd = new IntPtr(h);
+                    }
+                }
+            }
+            catch { }
+
+            if (hWnd == IntPtr.Zero)
+            {
+                // Try to get top-level window handle via process main window
+                try
+                {
+                    var pidProp = win.Properties.ProcessId;
+                    if (pidProp != null)
+                    {
+                        var pidVal = pidProp.Value;
+                        if (pidVal != 0)
+                        {
+                            var p = Process.GetProcessById((int)pidVal);
+                            if (p != null)
+                                hWnd = p.MainWindowHandle;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (hWnd == IntPtr.Zero)
+                throw new InvalidOperationException("Could not determine window handle for SendEnter fallback.");
+
+            // Bring to foreground
+            SetForegroundWindow(hWnd);
+            Thread.Sleep(100);
+
+            const byte VK_RETURN = 0x0D;
+            const uint KEYEVENTF_KEYUP = 0x0002;
+
+            keybd_event(VK_RETURN, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(50);
+            keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        }
+
+        // Return all descendant process ids (children, grandchildren, ...) for a given PID using WMI
+        private static List<int> GetDescendantProcessIds(int rootPid)
+        {
+            var results = new List<int>();
+            try
+            {
+                var map = new Dictionary<int, int?>();
+                using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId FROM Win32_Process"))
+                {
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        try
+                        {
+                            var pidObj = mo["ProcessId"];
+                            var ppidObj = mo["ParentProcessId"];
+                            if (pidObj == null) continue;
+                            int p = Convert.ToInt32(pidObj);
+                            int? pp = null;
+                            if (ppidObj != null) pp = Convert.ToInt32(ppidObj);
+                            map[p] = pp;
+                        }
+                        catch { }
+                    }
+                }
+
+                // BFS from rootPid
+                var queue = new Queue<int>();
+                queue.Enqueue(rootPid);
+                while (queue.Count > 0)
+                {
+                    var cur = queue.Dequeue();
+                    foreach (var kv in map)
+                    {
+                        if (kv.Value == cur)
+                        {
+                            if (!results.Contains(kv.Key))
+                            {
+                                results.Add(kv.Key);
+                                queue.Enqueue(kv.Key);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return results;
+        }
+
+        private static async Task InteractWithProcessAsync(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs, string? processNameHint)
         {
             try
             {
@@ -66,125 +178,214 @@ namespace AutoInstallerApp
 
                 var end = DateTime.UtcNow + TimeSpan.FromMilliseconds(timeoutMs);
 
+                int hostPid = Process.GetCurrentProcess().Id;
+
+                // Maintain per-window watchers so multiple windows can be handled concurrently
+                var windowWatchers = new Dictionary<int, CancellationTokenSource>();
+
                 while (!token.IsCancellationRequested && DateTime.UtcNow < end)
                 {
                     if (app.HasExited)
                     {
                         logCallback?.Invoke($"[AUTOMATOR] Process {pid} exited.");
-                        return;
+                        break;
                     }
 
-                    bool actionTaken = false;
-
-                    Window[] windows;
+                    // Build list of windows for the process and its child PIDs
+                    var windowList = new List<Window>();
                     try
                     {
-                        windows = app.GetAllTopLevelWindows(automation);
+                        var mainWindows = app.GetAllTopLevelWindows(automation);
+                        if (mainWindows != null)
+                            windowList.AddRange(mainWindows);
                     }
-                    catch
-                    {
-                        await Task.Delay(500);
-                        continue;
-                    }
+                    catch { }
 
-                    foreach (var win in windows)
+                    try
+                    {
+                        var childPids = GetDescendantProcessIds(pid);
+                        foreach (var cp in childPids)
+                        {
+                            try
+                            {
+                                var childApp = FlaUI.Core.Application.Attach(cp);
+                                var cw = childApp.GetAllTopLevelWindows(automation);
+                                if (cw != null)
+                                    windowList.AddRange(cw);
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+
+                    // For each window, ensure a watcher task is running
+                    foreach (var win in windowList)
                     {
                         if (win == null) continue;
-
-                        string title = win.Title ?? "";
-                        if (title.Contains("User Account Control", StringComparison.OrdinalIgnoreCase))
-                            continue;
-
-                        // 1) Toggle acceptance checkboxes
-                        var checkboxes = win.FindAllDescendants(cf => cf.ByControlType(ControlType.CheckBox));
-                        foreach (var cb in checkboxes)
+                        int winHandle = 0;
+                        try
                         {
-                            if (AcceptCheckboxTexts.Any(t => (cb.Name ?? "").Contains(t, StringComparison.OrdinalIgnoreCase)))
+                            // Try to read native window handle safely
+                            try
+                            {
+                                var hv = win.Properties.NativeWindowHandle.Value;
+                                winHandle = Convert.ToInt32(hv);
+                            }
+                            catch
+                            {
+                                // cannot get handle -> skip
+                                continue;
+                            }
+                        }
+                        catch { continue; }
+                        if (winHandle == 0) continue;
+
+                        if (!windowWatchers.ContainsKey(winHandle))
+                        {
+                            var wcts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                            windowWatchers[winHandle] = wcts;
+                            // Capture the window reference
+                            var capturedWin = win;
+                            Task.Run(async () =>
                             {
                                 try
                                 {
-                                    var box = cb.AsCheckBox();
-                                    if (box != null && (box.IsChecked == false || box.IsChecked == null))
+                                    while (!wcts.Token.IsCancellationRequested)
                                     {
-                                        box.Toggle();
-                                        logCallback?.Invoke($"[AUTOMATOR] Checkbox toggled: {cb.Name}");
-                                        actionTaken = true;
+                                        try
+                                        {
+                                            // If window closed or offscreen, break
+                                            try
+                                            {
+                                                var isOffObj = capturedWin.Properties.IsOffscreen?.Value;
+                                                if (isOffObj == true)
+                                                    break;
+                                            }
+                                            catch { }
+
+                                            // Process controls only within this window
+                                            bool acted = false;
+                                            try
+                                            {
+                                                // Check checkboxes
+                                                var cbs = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.CheckBox));
+                                                foreach (var cb in cbs)
+                                                {
+                                                    if (AcceptCheckboxTexts.Any(t => (cb.Name ?? "").Contains(t, StringComparison.OrdinalIgnoreCase)))
+                                                    {
+                                                        try
+                                                        {
+                                                            var box = cb.AsCheckBox();
+                                                            if (box != null && (box.IsChecked == false || box.IsChecked == null))
+                                                            {
+                                                                box.Toggle();
+                                                                logCallback?.Invoke($"[AUTOMATOR] Checkbox toggled (win {winHandle}): {cb.Name}");
+                                                                acted = true;
+                                                            }
+                                                        }
+                                                        catch { }
+                                                    }
+                                                }
+
+                                                // Check buttons
+                                                var btns = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
+                                                foreach (var b in btns)
+                                                {
+                                                    try
+                                                    {
+                                                        var name = b.Name ?? "";
+                                                        var nameNorm = (name ?? string.Empty).Trim();
+                                                        if (!CommonButtonNames.Any(t => System.Text.RegularExpressions.Regex.IsMatch(name ?? string.Empty, $"\\b{System.Text.RegularExpressions.Regex.Escape(t)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)))
+                                                            continue;
+                                                        if (NegativeButtonWords.Any(n => name.Contains(n, StringComparison.OrdinalIgnoreCase)))
+                                                            continue;
+                                                        // If this is a final-only button (finish/done/close), only act on it
+                                                        // when there are no other non-negative, non-final buttons available in the same window.
+                                                        bool isFinalOnly = FinalOnlyButtonNames.Any(fn => System.Text.RegularExpressions.Regex.IsMatch(nameNorm, $"\\b{System.Text.RegularExpressions.Regex.Escape(fn)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+                                                        if (isFinalOnly)
+                                                        {
+                                                            // determine if other actionable buttons exist
+                                                            bool otherActionableExists = false;
+                                                            foreach (var ob in btns)
+                                                            {
+                                                                try
+                                                                {
+                                                                    var on = ob.Name ?? string.Empty;
+                                                                    if (string.IsNullOrWhiteSpace(on)) continue;
+                                                                    // skip negatives
+                                                                    if (NegativeButtonWords.Any(n => on.Contains(n, StringComparison.OrdinalIgnoreCase))) continue;
+                                                                    // if other final-only, ignore
+                                                                    if (FinalOnlyButtonNames.Any(fn => System.Text.RegularExpressions.Regex.IsMatch(on, $"\\b{System.Text.RegularExpressions.Regex.Escape(fn)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))) continue;
+                                                                    // if matches the common names (and is enabled) then it's another actionable option
+                                                                    if (CommonButtonNames.Any(t => System.Text.RegularExpressions.Regex.IsMatch(on, $"\\b{System.Text.RegularExpressions.Regex.Escape(t)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)))
+                                                                    {
+                                                                        try { var obBtn = ob.AsButton(); if (obBtn != null && obBtn.IsEnabled) { otherActionableExists = true; break; } } catch { }
+                                                                    }
+                                                                }
+                                                                catch { }
+                                                            }
+
+                                                            if (otherActionableExists)
+                                                            {
+                                                                // skip pressing Finish/Done/Close if there are other options
+                                                                continue;
+                                                            }
+                                                        }
+
+                                                        var btn = b.AsButton();
+                                                        if (btn != null && btn.IsEnabled)
+                                                        {
+                                                            try
+                                                            {
+                                                                btn.Invoke();
+                                                                logCallback?.Invoke($"[AUTOMATOR] Invoke() → {name} (win {winHandle})");
+                                                                acted = true;
+                                                            }
+                                                            catch
+                                                            {
+                                                                try { capturedWin.AsWindow()?.Focus(); } catch { }
+                                                                try
+                                                                {
+                                                                    FlaUI.Core.Input.Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN);
+                                                                    logCallback?.Invoke($"[AUTOMATOR] Sent Enter (fallback) → {name} (win {winHandle})");
+                                                                    acted = true;
+                                                                }
+                                                                catch
+                                                                {
+                                                                    try { SendEnterToWindow(capturedWin); logCallback?.Invoke($"[AUTOMATOR] Sent Enter via SendInput → {name} (win {winHandle})"); acted = true; } catch { }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    catch { }
+                                                }
+                                            }
+                                            catch { }
+
+                                            if (acted)
+                                                await Task.Delay(700);
+                                            else
+                                                await Task.Delay(400);
+                                        }
+                                        catch { break; }
                                     }
                                 }
-                                catch { }
-                            }
-                        }
-
-                        // 2) Detect buttons
-                        var buttons = win.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
-
-                        foreach (var b in buttons)
-                        {
-                            if (b == null) continue;
-
-                            string name = b.Name ?? "";
-
-                            if (!CommonButtonNames.Any(t => name.Contains(t, StringComparison.OrdinalIgnoreCase)))
-                                continue;
-
-                            if (NegativeButtonWords.Any(n => name.Contains(n, StringComparison.OrdinalIgnoreCase)))
-                                continue;
-
-                            // === FALLBACK 1: Invoke() ===
-                            try
-                            {
-                                var btn = b.AsButton();
-                                if (btn != null && btn.IsEnabled)
+                                finally
                                 {
-                                    btn.Invoke();
-                                    logCallback?.Invoke($"[AUTOMATOR] Invoke() → {name}");
-                                    actionTaken = true;
-                                    await Task.Delay(700);
-                                    continue;
+                                    try { windowWatchers.Remove(winHandle); } catch { }
                                 }
-                            }
-                            catch { }
-
-                            // === FALLBACK 2: LegacyIAccessible ===
-                            try
-                            {
-                                var legacy = b.Patterns.LegacyIAccessible.PatternOrDefault;
-                                if (legacy != null)
-                                {
-                                    legacy.DoDefaultAction();
-                                    logCallback?.Invoke($"[AUTOMATOR] LegacyIAccessible → {name}");
-                                    actionTaken = true;
-                                    await Task.Delay(700);
-                                    continue;
-                                }
-                            }
-                            catch { }
-
-                            // === FALLBACK 3: Click por coordenadas ===
-                            try
-                            {
-                                var rect = b.BoundingRectangle;
-                                if (!rect.IsEmpty)
-                                {
-                                    int x = (int)(rect.Left + rect.Width / 2);
-                                    int y = (int)(rect.Top + rect.Height / 2);
-
-                                    FlaUI.Core.Input.Mouse.MoveTo(new System.Drawing.Point(x, y));
-                                    FlaUI.Core.Input.Mouse.Click(FlaUI.Core.Input.MouseButton.Left);
-
-
-                                    logCallback?.Invoke($"[AUTOMATOR] Coordinate click → {name} ({x},{y})");
-                                    actionTaken = true;
-                                    await Task.Delay(700);
-                                    continue;
-                                }
-                            }
-                            catch { }
+                            }, wcts.Token);
                         }
                     }
 
-                    if (!actionTaken)
-                        await Task.Delay(800);
+                    // Small delay before next enumeration
+                    await Task.Delay(500);
+                }
+
+                // Cancel any remaining watchers
+                foreach (var kv in windowWatchers)
+                {
+                    try { kv.Value.Cancel(); } catch { }
                 }
 
                 logCallback?.Invoke($"[AUTOMATOR] Timeout reached for PID {pid}");

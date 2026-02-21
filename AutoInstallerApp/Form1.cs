@@ -78,9 +78,7 @@ namespace AutoInstallerApp
 
             try
             {
-                // Initialize checkbox state from InstallerService flag
-                try { chkForceAgent.Checked = InstallerService.ForceUseAgent; } catch { }
-                try { chkForceAgent.CheckedChanged += (s, ev) => { try { InstallerService.ForceUseAgent = chkForceAgent.Checked; } catch { } }; } catch { }
+                // UI automation flag is controlled internally; checkbox removed from UI
             }
             catch { }
         }
@@ -107,132 +105,165 @@ namespace AutoInstallerApp
                 return;
             }
 
-            // === UI: Cambiar botones ===
-            btnStart.Visible = false;
-            btnStop.Visible = true;
-
-            // Start elapsed timer — reset only if label currently has a non-zero value
+            // Show checklist dialog so user can uncheck installers they don't want
             try
             {
-                if (!string.IsNullOrEmpty(lblTimer.Text) && lblTimer.Text != "00:00:00")
+                using (var dlg = new SelectInstallersForm(installers))
                 {
-                    try { lblTimer.Text = "00:00:00"; } catch { }
-                }
-            }
-            catch { }
-
-            startTime = DateTime.Now;
-            try { uiTimer.Start(); } catch { }
-
-            cancelToken = new CancellationTokenSource();
-
-            progressBar.Value = 0;
-            // Progress is reported as percentage (0-100)
-            progressBar.Maximum = 100;
-
-            AddLog("Classifying installers...");
-            Logger.Write("Classifying installers...");
-
-            // Run classification on background thread to avoid blocking UI at startup
-            var classification = await Task.Run(() =>
-            {
-                var lowRisk = new List<string>();
-                var mediumRisk = new List<string>();
-                var highRisk = new List<string>();
-                var rdpFiles = new List<string>();
-
-                foreach (string file in installers)
-                {
-                    if (cancelToken.IsCancellationRequested)
-                        break;
-
-                    string name = Path.GetFileName(file);
-
-                    if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                    var dr = dlg.ShowDialog();
+                    if (dr != DialogResult.OK)
                     {
-                        // postpone copying RDP until the unified installer scheduler so progress counts consistently
-                        rdpFiles.Add(file);
-                        continue;
+                        AddLog("[INFO] Installation cancelled by user (selection dialog). ");
+                        return;
                     }
 
-                    var level = InstallerService.GetRiskLevel(file);
+                    var selected = dlg.SelectedFiles ?? Array.Empty<string>();
+                    if (selected.Length == 0)
+                    {
+                        MessageBox.Show("No installers selected.");
+                        return;
+                    }
 
-                    if (level == InstallerService.RiskLevel.LowRisk)
-                        lowRisk.Add(file);
-                    else if (level == InstallerService.RiskLevel.MediumRisk)
-                        mediumRisk.Add(file);
-                    else
-                        highRisk.Add(file);
-                }
+                    // === UI: Cambiar botones ===
+                    btnStart.Visible = false;
+                    btnStop.Visible = true;
 
-                return (lowRisk, mediumRisk, highRisk, rdpFiles);
-            });
-            var lowRisk = classification.lowRisk;
-            var mediumRisk = classification.mediumRisk;
-            var highRisk = classification.highRisk;
-            var rdpFilesList = classification.rdpFiles;
-
-            AddLog($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
-            Logger.Write($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
-
-            AddLog("Starting installations...");
-            Logger.Write("Starting installations...");
-
-            // Reset scheduling info
-            InstallerService.ResetSchedule();
-
-            try
-            {
-                Action<int> progressCallback = (current) =>
-                {
+                    // Start elapsed timer — reset only if label currently has a non-zero value
                     try
                     {
-                        this.Invoke((Delegate)(() =>
+                        if (!string.IsNullOrEmpty(lblTimer.Text) && lblTimer.Text != "00:00:00")
                         {
-                            try { progressBar.Value = Math.Min(current, progressBar.Maximum); } catch { }
-                            try { progressBarlbl.Text = current.ToString() + "%"; } catch { }
-                        }));
+                            try { lblTimer.Text = "00:00:00"; } catch { }
+                        }
                     }
                     catch { }
-                };
 
-                await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, installers.Length, AddLog, progressCallback, cancelToken.Token);
-                // Unsubscribe after run (no skip button in this UI version)
+                    startTime = DateTime.Now;
+                    try { uiTimer.Start(); } catch { }
+
+                    cancelToken = new CancellationTokenSource();
+
+                    progressBar.Value = 0;
+                    // Progress is reported as percentage (0-100)
+                    progressBar.Maximum = 100;
+
+                    AddLog("Classifying installers...");
+                    Logger.Write("Classifying installers...");
+
+                    // Run classification on background thread to avoid blocking UI at startup
+                    var classification = await Task.Run(() =>
+                    {
+                        var lowRisk = new List<string>();
+                        var mediumRisk = new List<string>();
+                        var highRisk = new List<string>();
+                        var rdpFiles = new List<string>();
+
+                        foreach (string file in selected)
+                        {
+                            if (cancelToken.IsCancellationRequested)
+                                break;
+
+                            if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                            {
+                                rdpFiles.Add(file);
+                                continue;
+                            }
+
+                            var level = InstallerService.GetRiskLevel(file);
+
+                            if (level == InstallerService.RiskLevel.LowRisk)
+                                lowRisk.Add(file);
+                            else if (level == InstallerService.RiskLevel.MediumRisk)
+                                mediumRisk.Add(file);
+                            else
+                                highRisk.Add(file);
+                        }
+
+                        return (lowRisk, mediumRisk, highRisk, rdpFiles);
+                    });
+                    var lowRisk = classification.lowRisk;
+                    var mediumRisk = classification.mediumRisk;
+                    var highRisk = classification.highRisk;
+                    var rdpFilesList = classification.rdpFiles;
+
+                    AddLog($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
+                    Logger.Write($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
+
+                    AddLog("Starting installations...");
+                    Logger.Write("Starting installations...");
+
+                    // Reset scheduling info
+                    InstallerService.ResetSchedule();
+
+                    // Pre-copy only the selected installers to temp so we don't copy unselected files
+                    try
+                    {
+                        InstallerService.PrepareLocalCopies(selected, AddLog);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Write("[WARN] PrepareLocalCopies failed: " + ex.Message);
+                    }
+
+                    try
+                    {
+                        Action<int> progressCallback = (current) =>
+                        {
+                            try
+                            {
+                                this.Invoke((Delegate)(() =>
+                                {
+                                    try { progressBar.Value = Math.Min(current, progressBar.Maximum); } catch { }
+                                    try { progressBarlbl.Text = current.ToString() + "%"; } catch { }
+                                }));
+                            }
+                            catch { }
+                        };
+
+                        await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, selected.Length, AddLog, progressCallback, cancelToken.Token);
+                        // Unsubscribe after run (no skip button in this UI version)
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        AddLog("[STOP] Installation cancelled by user.");
+                    }
+
+                    AddLog("=== ALL INSTALLATIONS COMPLETE ===");
+                    Logger.Write("=== ALL INSTALLATIONS COMPLETE ===");
+
+                    // Show execution schedule: which installers started in parallel and which were postponed
+                    AddLog("[SCHEDULE] Started order:");
+                    Logger.Write("[SCHEDULE] Started order:");
+                    foreach (var s in InstallerService.StartedOrder)
+                    {
+                        var name = Path.GetFileName(s);
+                        AddLog($"  {name}");
+                        Logger.Write($"  {name}");
+                    }
+
+                    AddLog("[SCHEDULE] Postponed order:");
+                    Logger.Write("[SCHEDULE] Postponed order:");
+                    foreach (var p in InstallerService.PostponedOrder)
+                    {
+                        var name = Path.GetFileName(p);
+                        AddLog($"  {name}");
+                        Logger.Write($"  {name}");
+                    }
+
+                    // === UI: Restaurar botones ===
+                    btnStart.Visible = true;
+                    btnStop.Visible = false;
+                    cancelToken = null;
+
+                    // Stop elapsed timer (keep final elapsed value visible)
+                    try { uiTimer.Stop(); } catch { }
+                }
             }
-            catch (OperationCanceledException)
+            catch (Exception ex)
             {
-                AddLog("[STOP] Installation cancelled by user.");
+                Logger.Write("[ERROR] " + ex.ToString());
+                MessageBox.Show("An error occurred while preparing installers: " + ex.Message);
             }
-
-            AddLog("=== ALL INSTALLATIONS COMPLETE ===");
-            Logger.Write("=== ALL INSTALLATIONS COMPLETE ===");
-
-            // Show execution schedule: which installers started in parallel and which were postponed
-            AddLog("[SCHEDULE] Started order:");
-            Logger.Write("[SCHEDULE] Started order:");
-            foreach (var s in InstallerService.StartedOrder)
-            {
-                var name = Path.GetFileName(s);
-                AddLog($"  {name}");
-                Logger.Write($"  {name}");
-            }
-
-            AddLog("[SCHEDULE] Postponed order:");
-            Logger.Write("[SCHEDULE] Postponed order:");
-            foreach (var p in InstallerService.PostponedOrder)
-            {
-                var name = Path.GetFileName(p);
-                AddLog($"  {name}");
-                Logger.Write($"  {name}");
-            }
-
-            // === UI: Restaurar botones ===
-            btnStart.Visible = true;
-            btnStop.Visible = false;
-            cancelToken = null;
-
-            // Stop elapsed timer (keep final elapsed value visible)
-            try { uiTimer.Stop(); } catch { }
         }
 
         private void btnOpenLog_Click(object sender, EventArgs e)
@@ -244,15 +275,26 @@ namespace AutoInstallerApp
             else
                 MessageBox.Show($"The log file does not exist yet. Expected at:\n{logPath}");
         }
-        
+
 
         private void AddLog(string message)
         {
-            listLog.Invoke(() =>
+            try
             {
-                listLog.Items.Add(message);
-                listLog.TopIndex = listLog.Items.Count - 1;
-            });
+                listLog.Invoke(() =>
+                {
+                    listLog.Items.Add(message);
+                    listLog.TopIndex = listLog.Items.Count - 1;
+                });
+            }
+            catch { }
+
+            // Also persist UI-visible log lines to the disk log so they can be reported
+            try
+            {
+                Logger.Write(message);
+            }
+            catch { }
         }
 
         private void btnStop_Click(object sender, EventArgs e)

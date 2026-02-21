@@ -1,6 +1,6 @@
-﻿using System.Collections.Concurrent;
+﻿using Microsoft.Win32;
+using System.Collections.Concurrent;
 using System.Diagnostics;
-using Microsoft.Win32;
 
 namespace AutoInstallerApp
 {
@@ -12,8 +12,187 @@ namespace AutoInstallerApp
         public static Process? CurrentProcess;
         // Enable or disable the UI automation helper (can be toggled from the UI)
         public static bool EnableUiAutomation = true;
-        // If true, always launch the elevated helper agent to perform UI automation
-        public static bool ForceUseAgent = true;
+        // Named pipe used for agent communication
+        private const string AgentPipeName = "AutoInstallerAgentPipe";
+
+        // Launch the same executable as an elevated agent (once). Returns true if agent launch was initiated.
+        public static bool LaunchElevatedAgent(Action<string> logCallback)
+        {
+            try
+            {
+                // Try to determine current executable path. For single-file apps Assembly.Location may be empty;
+                // prefer Process.MainModule, fall back to entry assembly location and finally AppContext.BaseDirectory.
+                string? exe = null;
+                try { exe = Process.GetCurrentProcess().MainModule?.FileName; } catch { }
+                if (string.IsNullOrEmpty(exe))
+                {
+                    try { exe = System.Reflection.Assembly.GetEntryAssembly()?.Location; } catch { }
+                }
+                if (string.IsNullOrEmpty(exe))
+                {
+                    exe = AppContext.BaseDirectory; // last-resort: base directory (may not be full exe path)
+                }
+                if (string.IsNullOrEmpty(exe))
+                    return false;
+
+                var psi = new ProcessStartInfo(exe, "--agent")
+                {
+                    UseShellExecute = true,
+                    Verb = "runas"
+                };
+
+                // Start elevated agent (user will see UAC)
+                Process? agent = null;
+                try
+                {
+                    agent = Process.Start(psi);
+                    if (agent == null)
+                    {
+                        logCallback?.Invoke("[AGENT ERROR] Failed to start elevated agent (Process.Start returned null).");
+                        return false;
+                    }
+
+                    logCallback?.Invoke($"[AGENT] Launched agent process PID={agent.Id}, HasExited={agent.HasExited}");
+
+                    // Log any recorded failure reasons so caller/UI can report them
+                    try
+                    {
+                        if (!FailureReasons.IsEmpty)
+                        {
+                            logCallback($"[ERROR] {FailureReasons.Count} installation failures recorded:");
+                            foreach (var kv in FailureReasons)
+                            {
+                                try
+                                {
+                                    var name = Path.GetFileName(kv.Key);
+                                    logCallback($"  {name}: {kv.Value}");
+                                    try { Logger.Write($"[ERROR] {name}: {kv.Value}"); } catch { }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    catch { }
+
+                    // Wait for agent to be ready by pinging the named pipe
+                    logCallback?.Invoke("[INFO] Elevated agent started. Waiting for agent to accept pipe connections...");
+
+                    var swatch = System.Diagnostics.Stopwatch.StartNew();
+                    int timeoutMs = 30000; // increased timeout for agent readiness
+                    logCallback?.Invoke($"[AGENT] Waiting up to {timeoutMs}ms for agent to respond to ping...");
+                    while (swatch.ElapsedMilliseconds < timeoutMs)
+                    {
+                        try
+                        {
+                            using (var client = new System.IO.Pipes.NamedPipeClientStream(".", AgentPipeName, System.IO.Pipes.PipeDirection.InOut))
+                            {
+                                // try connect with small timeout
+                                try { client.Connect(500); } catch { throw; }
+                                using (var sr = new System.IO.StreamReader(client, System.Text.Encoding.UTF8, false, 4096, leaveOpen: true))
+                                using (var sw = new System.IO.StreamWriter(client, System.Text.Encoding.UTF8, 4096, leaveOpen: true) { AutoFlush = true })
+                                {
+                                    sw.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { cmd = "ping" }));
+                                    string? resp = sr.ReadLine();
+                                    if (resp != null && resp.Contains("pong"))
+                                    {
+                                        logCallback?.Invoke("[AGENT] Agent responded to ping.");
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                        catch { /* keep retrying */ }
+
+                        Thread.Sleep(500);
+                    }
+
+                    logCallback?.Invoke("[AGENT] Agent did not respond to ping within timeout.");
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    logCallback?.Invoke("[AGENT ERROR] Failed to start elevated agent: " + ex.Message);
+                    return false;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        // Send attach command to agent via named pipe. Waits briefly for agent to accept.
+        public static bool SendAttachCommandToAgent(int pid, Action<string> logCallback, int timeoutMs = 15000)
+        {
+            var swait = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                while (swait.ElapsedMilliseconds < timeoutMs)
+                {
+                    try
+                    {
+                        // Check whether PID exists and is alive
+                        bool pidAlive = false;
+                        try
+                        {
+                            var p = Process.GetProcessById(pid);
+                            pidAlive = !p.HasExited;
+                            logCallback?.Invoke($"[AGENT] Attach attempt: PID={pid}, Alive={pidAlive}, Timestamp={DateTime.Now:O}");
+                        }
+                        catch (Exception pe)
+                        {
+                            logCallback?.Invoke($"[AGENT] Attach attempt: PID={pid} not found ({pe.Message}), Timestamp={DateTime.Now:O}");
+                        }
+
+                        using (var client = new System.IO.Pipes.NamedPipeClientStream(".", AgentPipeName, System.IO.Pipes.PipeDirection.InOut))
+                        {
+                            // Try to connect; small timeout to allow retries
+                            try { client.Connect(500); } catch { throw; }
+
+                            if (!client.IsConnected)
+                            {
+                                logCallback?.Invoke($"[AGENT] Named pipe not connected yet (PID={pid})");
+                                Thread.Sleep(300);
+                                continue;
+                            }
+
+                            var sw = new System.IO.StreamWriter(client, System.Text.Encoding.UTF8) { AutoFlush = true };
+                            var sr = new System.IO.StreamReader(client, System.Text.Encoding.UTF8);
+
+                            var payload = System.Text.Json.JsonSerializer.Serialize(new { cmd = "attach", pid = pid });
+                            logCallback?.Invoke($"[AGENT] Sending attach payload to agent: {payload}");
+                            sw.WriteLine(payload);
+
+                            // Read response with small timeout
+                            var respTask = Task.Run(() => sr.ReadLine());
+                            if (respTask.Wait(2000))
+                            {
+                                string? resp = respTask.Result;
+                                logCallback?.Invoke($"[AGENT] Agent response: {resp}");
+                                if (resp != null && resp.Contains("ok"))
+                                    return true;
+                            }
+                            else
+                            {
+                                logCallback?.Invoke($"[AGENT] No response received from agent within 2s for PID={pid}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logCallback?.Invoke($"[AGENT ERROR] Attach attempt failed: {ex.Message}");
+                    }
+
+                    Thread.Sleep(700);
+                }
+            }
+            finally
+            {
+                logCallback?.Invoke($"[AGENT] Attach attempts finished after {swait.ElapsedMilliseconds}ms for PID={pid}");
+            }
+
+            logCallback?.Invoke("[AGENT] Could not connect to elevated agent (timeout or no OK response).");
+            return false;
+        }
         public static readonly object ProcessLock = new object();
         // All active processes started by the installer (concurrent)
         public static ConcurrentDictionary<int, Process> ActiveProcesses = new ConcurrentDictionary<int, Process>();
@@ -23,6 +202,10 @@ namespace AutoInstallerApp
         public static ConcurrentQueue<string> PostponedOrder = new ConcurrentQueue<string>();
         // Track which files have been completed (counted for progress)
         public static ConcurrentDictionary<string, bool> Completed = new ConcurrentDictionary<string, bool>();
+        // Track failure reasons for installers
+        public static ConcurrentDictionary<string, string> FailureReasons = new ConcurrentDictionary<string, string>();
+        // Map of original file -> local temp copy (only for pre-copied selected installers)
+        public static ConcurrentDictionary<string, string> LocalCopies = new ConcurrentDictionary<string, string>();
 
         public static void ResetSchedule()
         {
@@ -30,6 +213,50 @@ namespace AutoInstallerApp
             PostponedOrder = new ConcurrentQueue<string>();
             Completed = new ConcurrentDictionary<string, bool>();
             ActiveProcesses = new ConcurrentDictionary<int, Process>();
+            FailureReasons = new ConcurrentDictionary<string, string>();
+            LocalCopies = new ConcurrentDictionary<string, string>();
+        }
+
+        // Pre-copy only the selected installers to local temp folder. This avoids copying
+        // installers that were present in the source folder but not selected by the user.
+        public static void PrepareLocalCopies(IEnumerable<string> files, Action<string>? logCallback)
+        {
+            try
+            {
+                string tempFolder = Path.Combine(Path.GetTempPath(), "AutoInstaller");
+                Directory.CreateDirectory(tempFolder);
+
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        if (string.IsNullOrEmpty(f) || !File.Exists(f))
+                            continue;
+
+                        string dest = Path.Combine(tempFolder, Path.GetFileName(f));
+                        File.Copy(f, dest, true);
+                        LocalCopies.AddOrUpdate(f, dest, (k, v) => dest);
+                        try { logCallback?.Invoke($"[INFO] Pre-copied to local temp: {dest}"); } catch { }
+                    }
+                    catch (Exception ex)
+                    {
+                        try { logCallback?.Invoke($"[WARN] Could not pre-copy {Path.GetFileName(f)}: {ex.Message}"); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void RecordFailure(string file, string reason)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(file)) return;
+                if (string.IsNullOrEmpty(reason)) reason = "(no details)";
+                FailureReasons.AddOrUpdate(file, reason, (k, v) => reason);
+                try { Logger.Write($"[FAILURE] {Path.GetFileName(file)}: {reason}"); } catch { }
+            }
+            catch { }
         }
 
         // Heuristic: detect if the program corresponding to the file is already installed
@@ -230,110 +457,123 @@ namespace AutoInstallerApp
 
             logCallback("[INFO] Starting ALL installers in parallel (conflicts will be postponed)...");
 
-            var parallelOptions = new ParallelOptions
-            {
-                MaxDegreeOfParallelism = 3,
-                CancellationToken = token
-            };
-
             var failed = new ConcurrentBag<string>();
             var postponed = new ConcurrentBag<string>();
             int progressCount = 0;
             int totalItems = all.Count; // now includes rdp copy actions
             if (totalItems == 0) totalItems = 1;
 
-            await Task.Run(() =>
-            {
-                Parallel.ForEach(all, parallelOptions, file =>
-                {
-                    if (token.IsCancellationRequested)
-                        return;
+            int maxDegree = 3;
+            try { maxDegree = Math.Max(1, Environment.ProcessorCount); } catch { }
+            // limit to a sensible maximum to avoid too many parallel installers
+            maxDegree = Math.Min(maxDegree, 3);
 
-                    // Publish current file so UI can request skip
-                    CurrentFile = file;
-                    StartedOrder.Enqueue(file);
-                    // Record start order
-                    // (progress is counted when an installer finishes)
-                    // If program appears already installed, skip it
+            var semaphore = new SemaphoreSlim(maxDegree);
+            var tasks = new List<Task>();
+
+            foreach (var file in all)
+            {
+                if (token.IsCancellationRequested)
+                    break;
+
+                tasks.Add(Task.Run(async () =>
+                {
+                    await semaphore.WaitAsync(token).ConfigureAwait(false);
                     try
                     {
-                        if (IsProgramInstalled(file))
+                        if (token.IsCancellationRequested)
+                            return;
+
+                        // Publish current file so UI can request skip
+                        CurrentFile = file;
+                        StartedOrder.Enqueue(file);
+
+                        // If program appears already installed, skip it
+                        try
                         {
-                            var name = Path.GetFileName(file);
-                            logCallback($"[SKIPPED - ALREADY INSTALLED] {name}");
+                            if (IsProgramInstalled(file))
+                            {
+                                var name = Path.GetFileName(file);
+                                logCallback($"[SKIPPED - ALREADY INSTALLED] {name}");
+                                if (Completed.TryAdd(file, true))
+                                {
+                                    var completedCount = Interlocked.Increment(ref progressCount);
+                                    int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                                    try { progressCallback?.Invoke(percent); } catch { }
+                                }
+                                return;
+                            }
+                        }
+                        catch { }
+
+                        // If another installer is already active, wait a bit (instead of postponing) to avoid losing the item
+                        if (IsAnotherInstallerRunning())
+                        {
+                            logCallback($"[CONFLICT] Another installer active - waiting briefly before running {Path.GetFileName(file)}");
+                            WaitForInstallerToBeFree(logCallback, token);
+                        }
+
+                        // Handle RDP copy items directly (do not try to run them as installers)
+                        if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                                string dest = Path.Combine(desktop, Path.GetFileName(file));
+                                File.Copy(file, dest, true);
+                                logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
+                            }
+                            catch (Exception ex)
+                            {
+                                logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
+                                failed.Add(file);
+                            }
+
                             if (Completed.TryAdd(file, true))
                             {
                                 var completedCount = Interlocked.Increment(ref progressCount);
                                 int percent = (int)Math.Round(100.0 * completedCount / totalItems);
                                 try { progressCallback?.Invoke(percent); } catch { }
                             }
+
                             return;
                         }
-                    }
-                    catch { }
 
-                    // If user requested skip for this file: skipping feature removed — continue normal flow
-
-                    // If another installer is already active, postpone this one instead of waiting
-                    if (IsAnotherInstallerRunning())
-                    {
-                        postponed.Add(file);
-                        PostponedOrder.Enqueue(file);
-                        logCallback($"[CONFLICT] Another installer active - postponing {Path.GetFileName(file)}");
-                        // conflict/postpone — no progress change now (if RDP, copy later when processed)
-                        return;
-                    }
-
-                    // Handle RDP copy items directly (do not try to run them as installers)
-                    if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
-                    {
+                        bool ok = false;
                         try
                         {
-                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                            string dest = Path.Combine(desktop, Path.GetFileName(file));
-                            File.Copy(file, dest, true);
-                            logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
+                            ok = await InstallAsync(file, logCallback, token).ConfigureAwait(false);
                         }
-                        catch (Exception ex)
+                        catch
                         {
-                            logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
+                            ok = false;
                         }
 
-                        if (Completed.TryAdd(file, true))
+                        if (!ok)
+                            failed.Add(file);
+                        else
                         {
-                            var completedCount = Interlocked.Increment(ref progressCount);
-                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
-                            try { progressCallback?.Invoke(percent); } catch { }
-                        }
-
-                        return;
-                    }
-
-                    bool ok = false;
-                    try
-                    {
-                        ok = InstallAsync(file, logCallback, token).GetAwaiter().GetResult();
-                    }
-                    catch
-                    {
-                        ok = false;
-                    }
-
-                    if (!ok)
-                        failed.Add(file);
-                    else
-                    {
-                        // mark completed only once and update progress as percentage
-                        if (Completed.TryAdd(file, true))
-                        {
-                            var completedCount = Interlocked.Increment(ref progressCount);
-                            // compute percentage = 100 * completedCount / totalItems
-                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
-                            try { progressCallback?.Invoke(percent); } catch { }
+                            // mark completed only once and update progress as percentage
+                            if (Completed.TryAdd(file, true))
+                            {
+                                var completedCount = Interlocked.Increment(ref progressCount);
+                                int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                                try { progressCallback?.Invoke(percent); } catch { }
+                            }
                         }
                     }
-                });
-            });
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }, token));
+            }
+
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch { }
 
             if (!failed.IsEmpty)
             {
@@ -488,6 +728,7 @@ namespace AutoInstallerApp
                 catch (Exception ex)
                 {
                     logCallback($"[EXCEPTION] {file}: {ex.Message}");
+                    try { RecordFailure(file, ex.Message); } catch { }
                     return false;
                 }
             });
@@ -584,7 +825,9 @@ namespace AutoInstallerApp
                         try
                         {
                             automatorCtsOffice = CancellationTokenSource.CreateLinkedTokenSource(token);
-                            InstallerUiAutomator.InteractWithProcess(office.Id, logCallback, automatorCtsOffice.Token);
+                            string? pnameOffice = null;
+                            try { pnameOffice = Path.GetFileNameWithoutExtension(file); } catch { }
+                            InstallerUiAutomator.InteractWithProcess(office.Id, logCallback, automatorCtsOffice.Token, processNameHint: pnameOffice);
                         }
                         catch { }
 
@@ -602,6 +845,11 @@ namespace AutoInstallerApp
 
                         try { automatorCtsOffice?.Cancel(); } catch { }
 
+                        if (office.ExitCode != 0)
+                        {
+                            RecordFailure(file, $"Exit code {office.ExitCode}");
+                        }
+
                         return office.ExitCode == 0;
                     }
                     finally
@@ -614,13 +862,31 @@ namespace AutoInstallerApp
                 // ============================
                 // OTROS INSTALADORES
                 // ============================
-                string tempFolder = Path.Combine(Path.GetTempPath(), "AutoInstaller");
-                Directory.CreateDirectory(tempFolder);
+                string localFile;
+                // Use pre-copied local copy if available
+                if (LocalCopies.TryGetValue(file, out var mapped) && File.Exists(mapped))
+                {
+                    localFile = mapped;
+                    logCallback?.Invoke($"[INFO] Using pre-copied local temp: {localFile}");
+                }
+                else
+                {
+                    string tempFolder = Path.Combine(Path.GetTempPath(), "AutoInstaller");
+                    Directory.CreateDirectory(tempFolder);
 
-                string localFile = Path.Combine(tempFolder, Path.GetFileName(file));
-                File.Copy(file, localFile, true);
-
-                logCallback($"[INFO] Copied to local temp: {localFile}");
+                    localFile = Path.Combine(tempFolder, Path.GetFileName(file));
+                    try
+                    {
+                        File.Copy(file, localFile, true);
+                        logCallback?.Invoke($"[INFO] Copied to local temp: {localFile}");
+                    }
+                    catch (Exception ex)
+                    {
+                        // Fallback to original file if copy fails
+                        logCallback?.Invoke($"[WARN] Failed to copy to temp, using original: {ex.Message}");
+                        localFile = file;
+                    }
+                }
 
                 Process process = new Process();
 
@@ -663,7 +929,9 @@ namespace AutoInstallerApp
                         // If this process was started elevated and our process is not elevated, launching a helper
                         // may be necessary. We still start background automator here; the separate helper exists
                         // for scenarios where the app can spawn an elevated agent.
-                        InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token);
+                        string? pname = null;
+                        try { pname = Path.GetFileNameWithoutExtension(localFile); } catch { }
+                        InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token, processNameHint: pname);
                     }
                     catch { }
 
@@ -681,6 +949,11 @@ namespace AutoInstallerApp
 
                     try { automatorCts?.Cancel(); } catch { }
 
+                    if (process.ExitCode != 0)
+                    {
+                        RecordFailure(file, $"Exit code {process.ExitCode}");
+                    }
+
                     return process.ExitCode == 0;
                 }
                 finally
@@ -693,8 +966,104 @@ namespace AutoInstallerApp
             {
                 if (ex.NativeErrorCode == 740)
                 {
-                    logCallback("[INFO] Installer requires elevation.");
-                    return false;
+                    logCallback("[INFO] Installer requires elevation. Attempting elevated agent and elevated installer...");
+
+                    try
+                    {
+                        // Start elevated agent (user will accept UAC)
+                        LaunchElevatedAgent(logCallback);
+
+                        // Prepare local copy of installer as earlier
+                        string tempFolder = Path.Combine(Path.GetTempPath(), "AutoInstaller");
+                        Directory.CreateDirectory(tempFolder);
+                        string localFilePath = Path.Combine(tempFolder, Path.GetFileName(file));
+                        try { File.Copy(file, localFilePath, true); } catch { localFilePath = file; }
+
+                        // Determine arguments
+                        string exeNameLocal = Path.GetFileName(localFilePath).ToLower();
+                        string elevatedArgs = string.Empty;
+
+                        string[] nonSilentInstallers =
+                        {
+                            "chrome", "firefox", "edge", "anydesk",
+                            "teamviewer", "zoom", "acro", "reader",
+                            "java", "jre", "winrar",
+                            "sophos", "sophosinstall", "sophossetup"
+                        };
+
+                        var elevatedInfo = new ProcessStartInfo();
+                        if (localFilePath.EndsWith(".msi", StringComparison.OrdinalIgnoreCase))
+                        {
+                            elevatedInfo.FileName = "msiexec.exe";
+                            elevatedInfo.Arguments = $"/i \"{localFilePath}\" /qn /norestart";
+                        }
+                        else
+                        {
+                            elevatedInfo.FileName = localFilePath;
+                            if (nonSilentInstallers.Any(k => exeNameLocal.Contains(k)))
+                                elevatedInfo.Arguments = "";
+                            else
+                                elevatedInfo.Arguments = "/silent /verysilent /quiet /norestart";
+                        }
+
+                        elevatedInfo.UseShellExecute = true;
+                        elevatedInfo.CreateNoWindow = true;
+                        elevatedInfo.Verb = "runas";
+
+                        Process? elevatedProc = null;
+                        try
+                        {
+                            elevatedProc = Process.Start(elevatedInfo);
+                        }
+                        catch (Exception startEx)
+                        {
+                            logCallback($"[AGENT] Failed to start elevated installer: {startEx.Message}");
+                            try { RecordFailure(file, "Failed to start elevated installer: " + startEx.Message); } catch { }
+                            return false;
+                        }
+
+                        if (elevatedProc == null)
+                        {
+                            logCallback("[AGENT] Elevated installer did not start.");
+                            return false;
+                        }
+
+                        ActiveProcesses.TryAdd(elevatedProc.Id, elevatedProc);
+                        lock (ProcessLock) { CurrentProcess = elevatedProc; }
+
+                        // Give the agent some time to start and accept pipe connections
+                        Thread.Sleep(1200);
+
+                        // Ask elevated agent to attach and automate the elevated installer
+                        var attached = SendAttachCommandToAgent(elevatedProc.Id, logCallback);
+                        if (!attached)
+                        {
+                            logCallback("[AGENT] Could not attach to elevated installer.");
+                            try { RecordFailure(file, "Agent attach failed"); } catch { }
+                        }
+
+                        // Wait for elevated installer to exit
+                        while (!elevatedProc.HasExited)
+                        {
+                            if (token.IsCancellationRequested)
+                            {
+                                try { elevatedProc.Kill(); } catch { }
+                                return false;
+                            }
+                            Thread.Sleep(200);
+                        }
+                        if (elevatedProc.ExitCode != 0)
+                        {
+                            try { RecordFailure(file, $"Elevated exit code {elevatedProc.ExitCode}"); } catch { }
+                        }
+
+                        return elevatedProc.ExitCode == 0;
+                    }
+                    catch (Exception innerEx)
+                    {
+                        logCallback($"[AGENT ERROR] {innerEx.Message}");
+                        return false;
+                    }
                 }
 
                 throw;

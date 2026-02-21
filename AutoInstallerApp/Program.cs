@@ -6,8 +6,27 @@ namespace AutoInstallerApp
         ///  The main entry point for the application.
         /// </summary>
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            // If started with --agent, run agent loop and exit
+            try
+            {
+                if (args != null && args.Length > 0 && args[0] == "--agent")
+                {
+                    // Run elevated agent loop
+                    try
+                    {
+                        AutoInstallerAgent.AgentMain.RunAgentLoop();
+                    }
+                    catch (Exception ex)
+                    {
+                        try { Logger.Write("[AGENT FATAL] " + ex.ToString()); } catch { }
+                    }
+
+                    return;
+                }
+            }
+            catch { }
             // Global exception handlers so we can capture startup crashes (useful for single-file apps)
             Application.ThreadException += (s, e) =>
             {
