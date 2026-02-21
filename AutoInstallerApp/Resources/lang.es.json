@@ -1,0 +1,20 @@
+{
+  "Form1_Title": "Instalador Automático v3",
+  "SelectInstallers_Title": "Seleccionar Instaladores",
+  "InstallButton_Text": "Instalar",
+  "CancelButton_Text": "Cancelar",
+  "Welcome_Label": "Bienvenido al Instalador Automático",
+  "AcceptTerms_Checkbox": "Acepto los términos y condiciones",
+  "btnStart": "Iniciar Instalación",
+  "btnStop": "Detener Instalación",
+  "btnOpenLog": "Abrir archivo de registro",
+  "label1": "Carpeta raíz:",
+  "lblTimer": "00:00:00",
+  "progressBarlbl": "0%",
+  "txtFolder": "",
+  "listLog": "",
+  "chkInstallAll": "Instalar todo",
+  "UncheckInstallers_Info": "Desmarca los instaladores que no deseas ejecutar y luego presiona 'Instalar Seleccionados'.",
+  "SelectInstallersToRun": "Selecciona los instaladores a ejecutar",
+  "InstallSelected_Button": "Instalar Seleccionados"
+}

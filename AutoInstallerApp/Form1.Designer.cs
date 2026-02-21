@@ -1,4 +1,5 @@
-﻿using System.Drawing;
+﻿using AutoInstallerApp.Language;
+using System.Drawing;
 using System.Windows.Forms;
 
 namespace AutoInstallerApp
@@ -20,6 +21,7 @@ namespace AutoInstallerApp
         {
             System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(Form1));
             txtFolder = new TextBox();
+            chkInstallAll = new CheckBox();
             btnStart = new Button();
             listLog = new ListBox();
             progressBar = new ProgressBar();
@@ -36,42 +38,52 @@ namespace AutoInstallerApp
             // 
             // txtFolder
             // 
-            txtFolder.Location = new Point(12, 56);
+            txtFolder.Location = new Point(12, 95);
             txtFolder.Name = "txtFolder";
             txtFolder.Size = new Size(430, 23);
             txtFolder.TabIndex = 5;
             // 
+            // chkInstallAll
+            // 
+            chkInstallAll.AutoSize = true;
+            chkInstallAll.Location = new Point(459, 143);
+            chkInstallAll.Name = "chkInstallAll";
+            chkInstallAll.Size = new Size(74, 19);
+            chkInstallAll.TabIndex = 6;
+            chkInstallAll.Text = LanguageManager.Get("chkInstallAll");
+            chkInstallAll.UseVisualStyleBackColor = true;
+            // 
             // btnStart
             // 
-            btnStart.Location = new Point(12, 89);
+            btnStart.Location = new Point(12, 132);
             btnStart.Name = "btnStart";
             btnStart.Size = new Size(430, 30);
             btnStart.TabIndex = 3;
-            btnStart.Text = "Start Installation";
+            btnStart.Text = LanguageManager.Get("btnStart");
             btnStart.UseVisualStyleBackColor = true;
             btnStart.Click += btnStart_Click;
             // 
             // listLog
             // 
-            listLog.Location = new Point(12, 168);
+            listLog.Location = new Point(12, 203);
             listLog.Name = "listLog";
             listLog.Size = new Size(568, 229);
             listLog.TabIndex = 1;
             // 
             // progressBar
             // 
-            progressBar.Location = new Point(12, 133);
+            progressBar.Location = new Point(12, 168);
             progressBar.Name = "progressBar";
             progressBar.Size = new Size(567, 25);
             progressBar.TabIndex = 2;
             // 
             // btnOpenLog
             // 
-            btnOpenLog.Location = new Point(12, 408);
+            btnOpenLog.Location = new Point(12, 443);
             btnOpenLog.Name = "btnOpenLog";
             btnOpenLog.Size = new Size(172, 30);
             btnOpenLog.TabIndex = 0;
-            btnOpenLog.Text = "Open log file";
+            btnOpenLog.Text = LanguageManager.Get("btnOpenLog");
             btnOpenLog.UseVisualStyleBackColor = true;
             btnOpenLog.Click += btnOpenLog_Click;
             // 
@@ -79,17 +91,17 @@ namespace AutoInstallerApp
             // 
             label1.AutoSize = true;
             label1.Font = new Font("Segoe UI", 14.25F, FontStyle.Bold, GraphicsUnit.Point, 0);
-            label1.Location = new Point(12, 25);
+            label1.Location = new Point(12, 67);
             label1.Name = "label1";
             label1.Size = new Size(122, 25);
             label1.TabIndex = 6;
-            label1.Text = "Folder Root:";
+            label1.Text = LanguageManager.Get("label1");
             // 
             // label2
             // 
             label2.AutoSize = true;
             label2.Font = new Font("Segoe UI", 8.25F, FontStyle.Italic, GraphicsUnit.Point, 0);
-            label2.Location = new Point(509, 425);
+            label2.Location = new Point(509, 460);
             label2.Name = "label2";
             label2.Size = new Size(70, 13);
             label2.TabIndex = 7;
@@ -97,11 +109,11 @@ namespace AutoInstallerApp
             // 
             // btnStop
             // 
-            btnStop.Location = new Point(12, 89);
+            btnStop.Location = new Point(12, 132);
             btnStop.Name = "btnStop";
             btnStop.Size = new Size(430, 30);
             btnStop.TabIndex = 8;
-            btnStop.Text = "Stop Installation";
+            btnStop.Text = LanguageManager.Get("btnStop");
             btnStop.UseVisualStyleBackColor = true;
             btnStop.Click += btnStop_Click;
             // 
@@ -138,7 +150,7 @@ namespace AutoInstallerApp
             progressBarlbl.BackColor = Color.Transparent;
             progressBarlbl.FlatStyle = FlatStyle.Flat;
             progressBarlbl.Font = new Font("Segoe UI", 9F, FontStyle.Bold, GraphicsUnit.Point, 0);
-            progressBarlbl.Location = new Point(254, 138);
+            progressBarlbl.Location = new Point(254, 173);
             progressBarlbl.Name = "progressBarlbl";
             progressBarlbl.Size = new Size(24, 15);
             progressBarlbl.TabIndex = 12;
@@ -148,10 +160,11 @@ namespace AutoInstallerApp
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(592, 449);
+            ClientSize = new Size(592, 500);
             Controls.Add(progressBarlbl);
             Controls.Add(pictureBox1);
             Controls.Add(btnStop);
+            Controls.Add(chkInstallAll);
             Controls.Add(lblTimer);
             Controls.Add(label2);
             Controls.Add(label1);
@@ -162,7 +175,7 @@ namespace AutoInstallerApp
             Controls.Add(txtFolder);
             Icon = (Icon)resources.GetObject("$this.Icon");
             Name = "Form1";
-            Text = "Auto Installer";
+            Text = LanguageManager.Get("Form1_Title"); 
             ((System.ComponentModel.ISupportInitialize)pictureBox1).EndInit();
             ResumeLayout(false);
             PerformLayout();
@@ -171,6 +184,7 @@ namespace AutoInstallerApp
         #endregion
 
         private TextBox txtFolder;
+        private CheckBox chkInstallAll;
         private Button btnStart;
         private ListBox listLog;
         private ProgressBar progressBar;

@@ -9,37 +9,73 @@ namespace AutoInstallerApp
 {
     public static class InstallerUiAutomator
     {
+        // Defaults are kept here so the automator works even if localization files are not present.
         private static readonly string[] CommonButtonNames = new[]
         {
-            "next", "siguiente", "install", "instalar", "ok", "accept", "aceptar", "yes", "si", "continue",
-            "continuar", "aceptar y continuar"
+            "next", "siguiente",
+            "install", "instalar",
+            "ok", "aceptar", "accept",
+            "yes", "si", "sí",
+            "continue", "continuar",
+            "aceptar y continuar",
+            "run", "ejecutar",
+            "allow", "permitir",
+            "agree", "estar de acuerdo",
+            "i agree", "estoy de acuerdo",
+            "i accept", "acepto",
+            "proceed", "proceder",
+            "start", "iniciar",
+            "launch", "abrir", "lanzar",
+            "retry", "reintentar"
         };
 
-        // Buttons that should only be activated when they are the only meaningful option
         private static readonly string[] FinalOnlyButtonNames = new[]
         {
-            "finish", "done", "close"
+            "finish", "done", "close",
+            "finalizar", "hecho", "cerrar",
+            "complete", "completar",
+            "exit", "salir"
         };
 
         private static readonly string[] AcceptCheckboxTexts = new[]
         {
-            "i accept", "i agree", "acepto", "acepto los", "acepto los terminos", "aceptar"
+            "i accept", "i agree",
+            "acepto", "acepto los",
+            "acepto los terminos", "aceptar",
+            "i accept the terms", "i agree to the terms",
+            "acepto los términos y condiciones",
+            "acepto los acuerdos de licencia",
+            "i accept the license agreement",
+            "i agree to the license agreement"
         };
 
         private static readonly string[] NegativeButtonWords = new[]
         {
-            "cancel", "cancelar", "decline", "no", "deny", "rechazar"
+            "cancel", "cancelar",
+            "decline", "rechazar",
+            "no", "deny", "denegar",
+            "abort", "abortar",
+            "exit", "salir",
+            "quit", "cerrar"
         };
 
         private static readonly string[] PasswordFieldWords = new[]
         {
-            "password", "contraseña", "contrase", "clave", "pwd"
+            "password", "contraseña",
+            "contrase", "clave",
+            "pwd", "passcode",
+            "security key", "llave de seguridad"
         };
 
         private static readonly string[] LicenseFieldWords = new[]
         {
-            "license", "licencia", "serial", "product key", "productkey",
-            "clave del producto", "cd key", "cdkey", "número de serie"
+            "license", "licencia",
+            "serial", "product key", "productkey",
+            "clave del producto",
+            "cd key", "cdkey",
+            "número de serie", "numero de serie",
+            "activation key", "clave de activación",
+            "activation code", "código de activación"
         };
 
         public static void InteractWithProcess(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs = 120000, string? processNameHint = null)
@@ -265,6 +301,96 @@ namespace AutoInstallerApp
 
                                             // Process controls only within this window
                                             bool acted = false;
+
+                                            // 0) Detect required input fields (password/license). If present and empty, pause this watcher
+                                            try
+                                            {
+                                                var edits = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
+                                                bool needsInput = false;
+                                                AutomationElement? neededEdit = null;
+                                                foreach (var ed in edits)
+                                                {
+                                                    try
+                                                    {
+                                                        var ename = ed.Name ?? string.Empty;
+                                                        var labeledBy = ed.Properties.LabeledBy?.Value;
+                                                        var labelName = (labeledBy as AutomationElement)?.Name ?? string.Empty;
+
+                                                        string combined = (ename + " " + labelName).ToLowerInvariant();
+
+                                                        if (PasswordFieldWords.Any(w => combined.Contains(w)) || LicenseFieldWords.Any(w => combined.Contains(w)))
+                                                        {
+                                                            // read value if available
+                                                            string val = string.Empty;
+                                                            try
+                                                            {
+                                                                val = ed.Patterns.Value.PatternOrDefault?.Value ?? ed.AsTextBox()?.Text ?? string.Empty;
+                                                            }
+                                                            catch { }
+
+                                                            if (string.IsNullOrWhiteSpace(val))
+                                                            {
+                                                                needsInput = true;
+                                                                neededEdit = ed;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    catch { }
+                                                }
+
+                                                if (needsInput && neededEdit != null)
+                                                {
+                                                    logCallback?.Invoke($"[AUTOMATOR] Waiting for user input for field related to '{neededEdit.Name}' in window {winHandle}");
+
+                                                    // Snapshot current buttons and title to detect user click/change later
+                                                    var beforeButtons = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button)).Select(x => x.Name ?? string.Empty).ToArray();
+                                                    var beforeTitle = capturedWin.AsWindow()?.Title ?? string.Empty;
+
+                                                    // Wait until the edit receives a value or the window changes (user clicked)
+                                                    bool resumed = false;
+                                                    while (!wcts.Token.IsCancellationRequested)
+                                                    {
+                                                        try
+                                                        {
+                                                            // Check if window closed/offscreen
+                                                            try { if (capturedWin.Properties.IsOffscreen?.Value == true) break; } catch { }
+
+                                                            // Re-check value
+                                                            string val2 = string.Empty;
+                                                            try { val2 = neededEdit.Patterns.Value.PatternOrDefault?.Value ?? neededEdit.AsTextBox()?.Text ?? string.Empty; } catch { }
+                                                            if (!string.IsNullOrWhiteSpace(val2))
+                                                            {
+                                                                // Now wait for user to click/advance: detect change in button set or title or control tree
+                                                                for (int i = 0; i < 120 && !wcts.Token.IsCancellationRequested; i++) // wait up to ~120s for user click/change
+                                                                {
+                                                                    try
+                                                                    {
+                                                                        var afterButtons = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button)).Select(x => x.Name ?? string.Empty).ToArray();
+                                                                        var afterTitle = capturedWin.AsWindow()?.Title ?? string.Empty;
+                                                                        if (afterTitle != beforeTitle || afterButtons.Length != beforeButtons.Length || !afterButtons.SequenceEqual(beforeButtons))
+                                                                        {
+                                                                            resumed = true;
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                    catch { }
+                                                                    await Task.Delay(1000, wcts.Token).ConfigureAwait(false);
+                                                                }
+
+                                                                if (resumed) break;
+                                                            }
+                                                        }
+                                                        catch { }
+
+                                                        await Task.Delay(1000, wcts.Token).ConfigureAwait(false);
+                                                    }
+
+                                                    logCallback?.Invoke($"[AUTOMATOR] Resuming watcher for window {winHandle}");
+                                                }
+                                            }
+                                            catch { }
+
                                             try
                                             {
                                                 // Check checkboxes

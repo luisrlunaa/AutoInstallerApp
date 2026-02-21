@@ -1,3 +1,5 @@
+using AutoInstallerApp.Language;
+
 namespace AutoInstallerApp
 {
     public class SelectInstallersForm : Form
@@ -16,7 +18,7 @@ namespace AutoInstallerApp
 
         public SelectInstallersForm(string[] installers)
         {
-            this.Text = "Select installers to run";
+            this.Text = LanguageManager.Get("SelectInstallersToRun");
             this.Width = 600;
             this.Height = 400;
             this.StartPosition = FormStartPosition.CenterParent;
@@ -36,7 +38,7 @@ namespace AutoInstallerApp
             }
 
             btnInstall = new Button();
-            btnInstall.Text = "Install Selected";
+            btnInstall.Text = LanguageManager.Get("InstallSelected_Button");
             btnInstall.Width = 140;
             btnInstall.Top = chkList.Bottom + 10;
             btnInstall.Left = this.ClientSize.Width / 2 - btnInstall.Width - 10;
@@ -50,7 +52,7 @@ namespace AutoInstallerApp
             };
 
             btnCancel = new Button();
-            btnCancel.Text = "Cancel";
+            btnCancel.Text = LanguageManager.Get("CancelButton_Text");
             btnCancel.Width = 80;
             btnCancel.Top = chkList.Bottom + 10;
             btnCancel.Left = this.ClientSize.Width / 2 + 10;
@@ -62,7 +64,7 @@ namespace AutoInstallerApp
             };
 
             var lbl = new Label();
-            lbl.Text = "Uncheck any installers you do not want to run, then press 'Install Selected'.";
+            lbl.Text = LanguageManager.Get("UncheckInstallers_Info");
             lbl.AutoSize = false;
             lbl.Height = 30;
             lbl.Dock = DockStyle.Top;

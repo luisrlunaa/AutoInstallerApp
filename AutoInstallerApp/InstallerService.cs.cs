@@ -463,6 +463,11 @@ namespace AutoInstallerApp
             int totalItems = all.Count; // now includes rdp copy actions
             if (totalItems == 0) totalItems = 1;
 
+            // Smooth progress accumulation: compute fractional value per item and accumulate in a thread-safe way
+            double valorPorTarea = 100.0 / totalItems;
+            double acumulado = 0.0;
+            var progressLock = new object();
+
             int maxDegree = 3;
             try { maxDegree = Math.Max(1, Environment.ProcessorCount); } catch { }
             // limit to a sensible maximum to avoid too many parallel installers
@@ -497,8 +502,13 @@ namespace AutoInstallerApp
                                 logCallback($"[SKIPPED - ALREADY INSTALLED] {name}");
                                 if (Completed.TryAdd(file, true))
                                 {
-                                    var completedCount = Interlocked.Increment(ref progressCount);
-                                    int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                                    Interlocked.Increment(ref progressCount);
+                                    int percent;
+                                    lock (progressLock)
+                                    {
+                                        acumulado += valorPorTarea;
+                                        percent = (int)Math.Round(acumulado);
+                                    }
                                     try { progressCallback?.Invoke(percent); } catch { }
                                 }
                                 return;
@@ -531,8 +541,13 @@ namespace AutoInstallerApp
 
                             if (Completed.TryAdd(file, true))
                             {
-                                var completedCount = Interlocked.Increment(ref progressCount);
-                                int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                                Interlocked.Increment(ref progressCount);
+                                int percent;
+                                lock (progressLock)
+                                {
+                                    acumulado += valorPorTarea;
+                                    percent = (int)Math.Round(acumulado);
+                                }
                                 try { progressCallback?.Invoke(percent); } catch { }
                             }
 
@@ -556,8 +571,13 @@ namespace AutoInstallerApp
                             // mark completed only once and update progress as percentage
                             if (Completed.TryAdd(file, true))
                             {
-                                var completedCount = Interlocked.Increment(ref progressCount);
-                                int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                                Interlocked.Increment(ref progressCount);
+                                int percent;
+                                lock (progressLock)
+                                {
+                                    acumulado += valorPorTarea;
+                                    percent = (int)Math.Round(acumulado);
+                                }
                                 try { progressCallback?.Invoke(percent); } catch { }
                             }
                         }
@@ -602,8 +622,13 @@ namespace AutoInstallerApp
 
                         if (Completed.TryAdd(f, true))
                         {
-                            var completedCount = Interlocked.Increment(ref progressCount);
-                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            Interlocked.Increment(ref progressCount);
+                            int percent;
+                            lock (progressLock)
+                            {
+                                acumulado += valorPorTarea;
+                                percent = (int)Math.Round(acumulado);
+                            }
                             try { progressCallback?.Invoke(percent); } catch { }
                         }
                     }
@@ -646,8 +671,13 @@ namespace AutoInstallerApp
 
                         if (Completed.TryAdd(p, true))
                         {
-                            var completedCount = Interlocked.Increment(ref progressCount);
-                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            Interlocked.Increment(ref progressCount);
+                            int percent;
+                            lock (progressLock)
+                            {
+                                acumulado += valorPorTarea;
+                                percent = (int)Math.Round(acumulado);
+                            }
                             try { progressCallback?.Invoke(percent); } catch { }
                         }
                     }
@@ -894,6 +924,7 @@ namespace AutoInstallerApp
                 {
                     process.StartInfo.FileName = localFile;
 
+                    // Determine appropriate silent arguments based on installer engine when possible
                     if (nonSilentInstallers.Any(k => exeName.Contains(k)))
                     {
                         process.StartInfo.Arguments = "";
@@ -901,7 +932,42 @@ namespace AutoInstallerApp
                     }
                     else
                     {
-                        process.StartInfo.Arguments = "/silent /verysilent /quiet /norestart";
+                        // Try to sniff common installer engines by reading the start of the file
+                        string exeContent = string.Empty;
+                        try
+                        {
+                            const int maxRead = 64 * 1024;
+                            byte[] buffer = new byte[maxRead];
+                            using (var fs = new FileStream(localFile, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
+                            {
+                                int read = fs.Read(buffer, 0, maxRead);
+                                exeContent = System.Text.Encoding.UTF8.GetString(buffer, 0, Math.Max(0, read));
+                            }
+                        }
+                        catch { }
+
+                        if (!string.IsNullOrEmpty(exeContent) && exeContent.IndexOf("Inno Setup", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            process.StartInfo.Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART";
+                            logCallback("[INFO] Inno Setup detected, using Inno silent args");
+                        }
+                        else if (!string.IsNullOrEmpty(exeContent) && (exeContent.IndexOf("Nullsoft", StringComparison.OrdinalIgnoreCase) >= 0 || exeContent.IndexOf("NSIS", StringComparison.OrdinalIgnoreCase) >= 0))
+                        {
+                            process.StartInfo.Arguments = "/S"; // NSIS silent
+                            logCallback("[INFO] NSIS/Nullsoft detected, using /S");
+                        }
+                        else if (!string.IsNullOrEmpty(exeContent) && exeContent.IndexOf("InstallShield", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            // InstallShield installers often support /s or msiexec-based silent; try /s as conservative option
+                            process.StartInfo.Arguments = "/s";
+                            logCallback("[INFO] InstallShield detected, using /s (may require MSI wrapper)");
+                        }
+                        else
+                        {
+                            // Generic fallback: common silent switches (some installers will ignore unknown params)
+                            process.StartInfo.Arguments = "/silent";
+                            logCallback("[INFO] Using generic /silent argument as fallback");
+                        }
                     }
                 }
                 else if (localFile.EndsWith(".msi", StringComparison.OrdinalIgnoreCase))

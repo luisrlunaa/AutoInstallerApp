@@ -1,3 +1,5 @@
+using AutoInstallerApp.Language;
+
 namespace AutoInstallerApp
 {
     internal static class Program
@@ -44,6 +46,7 @@ namespace AutoInstallerApp
                 // To customize application configuration such as set high DPI settings or default font,
                 // see https://aka.ms/applicationconfiguration.
                 ApplicationConfiguration.Initialize();
+                LanguageManager.Initialize();
                 Application.Run(new Form1());
             }
             catch (Exception ex)

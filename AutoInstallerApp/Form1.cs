@@ -1,3 +1,4 @@
+using AutoInstallerApp.Language;
 using System.Diagnostics;
 
 namespace AutoInstallerApp
@@ -11,6 +12,11 @@ namespace AutoInstallerApp
             try
             {
                 InitializeComponent();
+                // Initialize language resources and apply localized texts to controls (if resources available)
+                try { LanguageManager.ApplyToForm(this); } catch { }
+
+                // Listen for system locale/user preference changes to re-load language at runtime
+                try { Microsoft.Win32.SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged; this.FormClosed += Form1_FormClosed; } catch { }
             }
             catch (Exception ex)
             {
@@ -39,6 +45,24 @@ namespace AutoInstallerApp
 
         private System.Windows.Forms.Timer uiTimer;
         private DateTime? startTime;
+
+        private void Form1_FormClosed(object? sender, FormClosedEventArgs e)
+        {
+            try { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged; } catch { }
+        }
+
+        private void SystemEvents_UserPreferenceChanged(object? sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+        {
+            try
+            {
+                if (e.Category == Microsoft.Win32.UserPreferenceCategory.Locale || e.Category == Microsoft.Win32.UserPreferenceCategory.General)
+                {
+                    // Reinitialize language resources and reapply UI texts on the UI thread
+                    try { this.Invoke(() => { LanguageManager.ApplyToForm(this); }); } catch { }
+                }
+            }
+            catch { }
+        }
 
         private void UiTimer_Tick(object? sender, EventArgs e)
         {
@@ -75,12 +99,6 @@ namespace AutoInstallerApp
             {
                 try { Logger.Write("[LOAD IMAGE ERROR] " + ex.ToString()); } catch { }
             }
-
-            try
-            {
-                // UI automation flag is controlled internally; checkbox removed from UI
-            }
-            catch { }
         }
 
         private async void btnStart_Click(object sender, EventArgs e)
@@ -93,11 +111,41 @@ namespace AutoInstallerApp
                 return;
             }
 
-            string[] installers = Directory.GetFiles(folder, "*.*", SearchOption.TopDirectoryOnly)
-                .Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) ||
-                            f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
-                .ToArray();
+            // Collect installers from root and immediate child directories only (no deeper recursion)
+            var installersList = new List<string>();
+            try
+            {
+                // files directly in root
+                installersList.AddRange(Directory.GetFiles(folder, "*.*", SearchOption.TopDirectoryOnly)
+                    .Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                                f.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) ||
+                                f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase)));
+
+                // files in immediate child directories of root (one level deep only)
+                try
+                {
+                    var childDirs = Directory.GetDirectories(folder);
+                    foreach (var d in childDirs)
+                    {
+                        try
+                        {
+                            var childFiles = Directory.GetFiles(d, "*.*", SearchOption.TopDirectoryOnly)
+                                .Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                                            f.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) ||
+                                            f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase));
+                            installersList.AddRange(childFiles);
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                try { Logger.Write("[WARN] Could not enumerate installers: " + ex.Message); } catch { }
+            }
+
+            string[] installers = installersList.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
             if (installers.Length == 0)
             {
@@ -105,159 +153,271 @@ namespace AutoInstallerApp
                 return;
             }
 
-            // Show checklist dialog so user can uncheck installers they don't want
+            // Determine selected installers: either all (if 'Install All' is checked) or from selection dialog
             try
             {
-                using (var dlg = new SelectInstallersForm(installers))
+                string[] selected;
+                if (chkInstallAll != null && chkInstallAll.Checked)
                 {
-                    var dr = dlg.ShowDialog();
-                    if (dr != DialogResult.OK)
-                    {
-                        AddLog("[INFO] Installation cancelled by user (selection dialog). ");
-                        return;
-                    }
-
-                    var selected = dlg.SelectedFiles ?? Array.Empty<string>();
-                    if (selected.Length == 0)
-                    {
-                        MessageBox.Show("No installers selected.");
-                        return;
-                    }
-
-                    // === UI: Cambiar botones ===
-                    btnStart.Visible = false;
-                    btnStop.Visible = true;
-
-                    // Start elapsed timer — reset only if label currently has a non-zero value
-                    try
-                    {
-                        if (!string.IsNullOrEmpty(lblTimer.Text) && lblTimer.Text != "00:00:00")
-                        {
-                            try { lblTimer.Text = "00:00:00"; } catch { }
-                        }
-                    }
-                    catch { }
-
-                    startTime = DateTime.Now;
-                    try { uiTimer.Start(); } catch { }
-
-                    cancelToken = new CancellationTokenSource();
-
-                    progressBar.Value = 0;
-                    // Progress is reported as percentage (0-100)
-                    progressBar.Maximum = 100;
-
-                    AddLog("Classifying installers...");
-                    Logger.Write("Classifying installers...");
-
-                    // Run classification on background thread to avoid blocking UI at startup
-                    var classification = await Task.Run(() =>
-                    {
-                        var lowRisk = new List<string>();
-                        var mediumRisk = new List<string>();
-                        var highRisk = new List<string>();
-                        var rdpFiles = new List<string>();
-
-                        foreach (string file in selected)
-                        {
-                            if (cancelToken.IsCancellationRequested)
-                                break;
-
-                            if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
-                            {
-                                rdpFiles.Add(file);
-                                continue;
-                            }
-
-                            var level = InstallerService.GetRiskLevel(file);
-
-                            if (level == InstallerService.RiskLevel.LowRisk)
-                                lowRisk.Add(file);
-                            else if (level == InstallerService.RiskLevel.MediumRisk)
-                                mediumRisk.Add(file);
-                            else
-                                highRisk.Add(file);
-                        }
-
-                        return (lowRisk, mediumRisk, highRisk, rdpFiles);
-                    });
-                    var lowRisk = classification.lowRisk;
-                    var mediumRisk = classification.mediumRisk;
-                    var highRisk = classification.highRisk;
-                    var rdpFilesList = classification.rdpFiles;
-
-                    AddLog($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
-                    Logger.Write($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
-
-                    AddLog("Starting installations...");
-                    Logger.Write("Starting installations...");
-
-                    // Reset scheduling info
-                    InstallerService.ResetSchedule();
-
-                    // Pre-copy only the selected installers to temp so we don't copy unselected files
-                    try
-                    {
-                        InstallerService.PrepareLocalCopies(selected, AddLog);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Write("[WARN] PrepareLocalCopies failed: " + ex.Message);
-                    }
-
-                    try
-                    {
-                        Action<int> progressCallback = (current) =>
-                        {
-                            try
-                            {
-                                this.Invoke((Delegate)(() =>
-                                {
-                                    try { progressBar.Value = Math.Min(current, progressBar.Maximum); } catch { }
-                                    try { progressBarlbl.Text = current.ToString() + "%"; } catch { }
-                                }));
-                            }
-                            catch { }
-                        };
-
-                        await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, selected.Length, AddLog, progressCallback, cancelToken.Token);
-                        // Unsubscribe after run (no skip button in this UI version)
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        AddLog("[STOP] Installation cancelled by user.");
-                    }
-
-                    AddLog("=== ALL INSTALLATIONS COMPLETE ===");
-                    Logger.Write("=== ALL INSTALLATIONS COMPLETE ===");
-
-                    // Show execution schedule: which installers started in parallel and which were postponed
-                    AddLog("[SCHEDULE] Started order:");
-                    Logger.Write("[SCHEDULE] Started order:");
-                    foreach (var s in InstallerService.StartedOrder)
-                    {
-                        var name = Path.GetFileName(s);
-                        AddLog($"  {name}");
-                        Logger.Write($"  {name}");
-                    }
-
-                    AddLog("[SCHEDULE] Postponed order:");
-                    Logger.Write("[SCHEDULE] Postponed order:");
-                    foreach (var p in InstallerService.PostponedOrder)
-                    {
-                        var name = Path.GetFileName(p);
-                        AddLog($"  {name}");
-                        Logger.Write($"  {name}");
-                    }
-
-                    // === UI: Restaurar botones ===
-                    btnStart.Visible = true;
-                    btnStop.Visible = false;
-                    cancelToken = null;
-
-                    // Stop elapsed timer (keep final elapsed value visible)
-                    try { uiTimer.Stop(); } catch { }
+                    selected = installers;
                 }
+                else
+                {
+                    using (var dlg = new SelectInstallersForm(installers))
+                    {
+                        var dr = dlg.ShowDialog();
+                        if (dr != DialogResult.OK)
+                        {
+                            AddLog("[INFO] Installation cancelled by user (selection dialog). ");
+                            return;
+                        }
+
+                        selected = dlg.SelectedFiles ?? Array.Empty<string>();
+                        if (selected.Length == 0)
+                        {
+                            MessageBox.Show("No installers selected.");
+                            return;
+                        }
+                    }
+                }
+
+                // After selection: check for special folder "revisar" and reorder to install certain installers last
+                try
+                {
+                    var rootFolder = folder;
+                    var specialFolder = Path.Combine(rootFolder, "revisar");
+                    var specialInstallers = new List<string>();
+                    if (Directory.Exists(specialFolder))
+                    {
+                        AddLog($"[INFO] Found special folder: {specialFolder}");
+                        // find installers in special folder
+                        specialInstallers = Directory.GetFiles(specialFolder, "*.*", SearchOption.TopDirectoryOnly)
+                            .Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+
+                        if (specialInstallers.Count > 0)
+                            AddLog($"[INFO] Found {specialInstallers.Count} installer(s) in 'revisar' folder to run after root installers.");
+                    }
+
+                    // Determine which installers should be executed at the end
+                    var finalOrderNames = new List<string>();
+
+                    // Office detection: any file name containing 'office' (case-insensitive)
+                    var officeCandidates = selected.Where(s => Path.GetFileName(s).IndexOf("office", StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+                    bool hasOffice = officeCandidates.Count > 0;
+                    if (hasOffice)
+                        AddLog("[INFO] Office installer detected; it will be scheduled to run last.");
+
+                    // Specific installers to run after Office (if present) in this order
+                    var tailOrderFileNames = new[] {
+                        "VisualStudio",
+                        "AdobePhotoshop",
+                        "AdobeIllustrator",
+                        "AdobePremiere",
+                        "AdobeAfterEffects",
+                        "DaVinci_Resolve_Installer"
+                    };
+
+                    // Build sets for quick lookup (file names only)
+                    var selectedFileNames = new HashSet<string>(selected.Select(s => Path.GetFileName(s)), StringComparer.OrdinalIgnoreCase);
+                    var specialFileNames = new HashSet<string>(specialInstallers.Select(s => Path.GetFileName(s)), StringComparer.OrdinalIgnoreCase);
+
+                    // Start with Office (if any) — choose first match from selected (preserve full path)
+                    if (hasOffice)
+                    {
+                        var officePath = officeCandidates.First();
+                        finalOrderNames.Add(officePath);
+                        selected = selected.Where(s => !Path.GetFileName(s).Equals(Path.GetFileName(officePath), StringComparison.OrdinalIgnoreCase)).ToArray();
+                    }
+
+                    // Then append the specific tail installers if present (from selected or special folder), in the given order
+                    foreach (var fname in tailOrderFileNames)
+                    {
+                        // prefer files from root selection first, then from special folder
+                        // Use "contains" style matching (case-insensitive) so partial/similar names are matched
+                        string shortName = Path.GetFileNameWithoutExtension(fname);
+                        string? match = selected.FirstOrDefault(s =>
+                                Path.GetFileName(s).IndexOf(shortName, StringComparison.OrdinalIgnoreCase) >= 0
+                                || Path.GetFileNameWithoutExtension(s).IndexOf(shortName, StringComparison.OrdinalIgnoreCase) >= 0
+                            )
+                            ?? specialInstallers.FirstOrDefault(s =>
+                                Path.GetFileName(s).IndexOf(shortName, StringComparison.OrdinalIgnoreCase) >= 0
+                                || Path.GetFileNameWithoutExtension(s).IndexOf(shortName, StringComparison.OrdinalIgnoreCase) >= 0
+                            );
+
+                        if (match != null)
+                        {
+                            finalOrderNames.Add(match);
+                            // remove any selected entries that match this fname by contains
+                            selected = selected.Where(s =>
+                                !(Path.GetFileName(s).IndexOf(shortName, StringComparison.OrdinalIgnoreCase) >= 0
+                                  || Path.GetFileNameWithoutExtension(s).IndexOf(shortName, StringComparison.OrdinalIgnoreCase) >= 0)
+                            ).ToArray();
+                        }
+                    }
+
+                    // After building final tail list, append any installers found in 'revisar' that were not already included
+                    foreach (var sp in specialInstallers)
+                    {
+                        if (!finalOrderNames.Any(f => Path.GetFileName(f).Equals(Path.GetFileName(sp), StringComparison.OrdinalIgnoreCase)))
+                        {
+                            // only include special folder installers if they were not part of the original selected list and are valid
+                            if (!selected.Any(s => Path.GetFileName(s).Equals(Path.GetFileName(sp), StringComparison.OrdinalIgnoreCase)))
+                                finalOrderNames.Add(sp);
+                        }
+                    }
+
+                    // Compose final selection: original selected (remaining, preserving order) followed by finalOrderNames
+                    var finalSelectedList = new List<string>();
+                    finalSelectedList.AddRange(selected);
+                    // ensure we append only files that actually exist and are not duplicates
+                    foreach (var f in finalOrderNames)
+                    {
+                        if (!finalSelectedList.Any(existing => Path.GetFileName(existing).Equals(Path.GetFileName(f), StringComparison.OrdinalIgnoreCase)))
+                            finalSelectedList.Add(f);
+                    }
+
+                    selected = finalSelectedList.ToArray();
+                    AddLog($"[INFO] Installation order prepared. Total installers: {selected.Length}");
+                }
+                catch (Exception ex)
+                {
+                    try { Logger.Write("[WARN] CouldNotPrepareFinalOrder: " + ex.Message); } catch { }
+                }
+
+                // === UI: Cambiar botones ===
+                btnStart.Visible = false;
+                btnStop.Visible = true;
+
+                // Start elapsed timer — reset only if label currently has a non-zero value
+                try
+                {
+                    if (!string.IsNullOrEmpty(lblTimer.Text) && lblTimer.Text != "00:00:00")
+                    {
+                        try { lblTimer.Text = "00:00:00"; } catch { }
+                    }
+                }
+                catch { }
+
+                startTime = DateTime.Now;
+                try { uiTimer.Start(); } catch { }
+
+                cancelToken = new CancellationTokenSource();
+
+                progressBar.Value = 0;
+                // Progress is reported as percentage (0-100)
+                progressBar.Maximum = 100;
+
+                AddLog("Classifying installers...");
+                Logger.Write("Classifying installers...");
+
+                // Run classification on background thread to avoid blocking UI at startup
+                var classification = await Task.Run(() =>
+                {
+                    var lowRisk = new List<string>();
+                    var mediumRisk = new List<string>();
+                    var highRisk = new List<string>();
+                    var rdpFiles = new List<string>();
+
+                    foreach (string file in selected)
+                    {
+                        if (cancelToken.IsCancellationRequested)
+                            break;
+
+                        if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
+                        {
+                            rdpFiles.Add(file);
+                            continue;
+                        }
+
+                        var level = InstallerService.GetRiskLevel(file);
+
+                        if (level == InstallerService.RiskLevel.LowRisk)
+                            lowRisk.Add(file);
+                        else if (level == InstallerService.RiskLevel.MediumRisk)
+                            mediumRisk.Add(file);
+                        else
+                            highRisk.Add(file);
+                    }
+
+                    return (lowRisk, mediumRisk, highRisk, rdpFiles);
+                });
+                var lowRisk = classification.lowRisk;
+                var mediumRisk = classification.mediumRisk;
+                var highRisk = classification.highRisk;
+                var rdpFilesList = classification.rdpFiles;
+
+                AddLog($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
+                Logger.Write($"LowRisk: {lowRisk.Count}, MediumRisk: {mediumRisk.Count}, HighRisk: {highRisk.Count}");
+
+                AddLog("Starting installations...");
+                Logger.Write("Starting installations...");
+
+                // Reset scheduling info
+                InstallerService.ResetSchedule();
+
+                // Pre-copy only the selected installers to temp so we don't copy unselected files
+                try
+                {
+                    InstallerService.PrepareLocalCopies(selected, AddLog);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Write("[WARN] PrepareLocalCopies failed: " + ex.Message);
+                }
+
+                try
+                {
+                    Action<int> progressCallback = (current) =>
+                    {
+                        try
+                        {
+                            this.Invoke((Delegate)(() =>
+                            {
+                                try { progressBar.Value = Math.Min(current, progressBar.Maximum); } catch { }
+                                try { progressBarlbl.Text = current.ToString() + "%"; } catch { }
+                            }));
+                        }
+                        catch { }
+                    };
+
+                    await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, selected.Length, AddLog, progressCallback, cancelToken.Token);
+                    // Unsubscribe after run (no skip button in this UI version)
+                }
+                catch (OperationCanceledException)
+                {
+                    AddLog("[STOP] Installation cancelled by user.");
+                }
+
+                AddLog("=== ALL INSTALLATIONS COMPLETE ===");
+                Logger.Write("=== ALL INSTALLATIONS COMPLETE ===");
+
+                // Show execution schedule: which installers started in parallel and which were postponed
+                AddLog("[SCHEDULE] Started order:");
+                Logger.Write("[SCHEDULE] Started order:");
+                foreach (var s in InstallerService.StartedOrder)
+                {
+                    var name = Path.GetFileName(s);
+                    AddLog($"  {name}");
+                    Logger.Write($"  {name}");
+                }
+
+                AddLog("[SCHEDULE] Postponed order:");
+                Logger.Write("[SCHEDULE] Postponed order:");
+                foreach (var p in InstallerService.PostponedOrder)
+                {
+                    var name = Path.GetFileName(p);
+                    AddLog($"  {name}");
+                    Logger.Write($"  {name}");
+                }
+
+                // === UI: Restaurar botones ===
+                btnStart.Visible = true;
+                btnStop.Visible = false;
+                cancelToken = null;
+
+                // Stop elapsed timer (keep final elapsed value visible)
+                try { uiTimer.Stop(); } catch { }
             }
             catch (Exception ex)
             {

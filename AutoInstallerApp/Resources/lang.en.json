@@ -1,0 +1,20 @@
+{
+  "Form1_Title": "Auto Installer v3",
+  "SelectInstallers_Title": "Select Installers",
+  "InstallButton_Text": "Install",
+  "CancelButton_Text": "Cancel",
+  "Welcome_Label": "Welcome to the Auto Installer",
+  "AcceptTerms_Checkbox": "I accept the terms and conditions",
+  "btnStart": "Start Installation",
+  "btnStop": "Stop Installation",
+  "btnOpenLog": "Open log file",
+  "label1": "Folder Root:",
+  "lblTimer": "00:00:00",
+  "progressBarlbl": "0%",
+  "txtFolder": "",
+  "listLog": "",
+  "chkInstallAll": "Install All",
+  "UncheckInstallers_Info": "Uncheck any installers you do not want to run, then press 'Install Selected'.",
+  "SelectInstallersToRun": "Select installers to run",
+  "InstallSelected_Button": "Install Selected"
+}
