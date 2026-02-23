@@ -107,8 +107,20 @@ namespace AutoInstallerApp
 
             if (!Directory.Exists(folder))
             {
-                MessageBox.Show("The folder does not exist.");
-                return;
+                var UNCpath = string.Empty;
+                if (folder.Contains(":"))
+                {
+                    var newPath = folder.Split(":");
+                    UNCpath = newPath.Length > 1 ? @"\\CORP.local\\PROCO" + newPath[1] : folder;
+                 }
+
+                if (!Directory.Exists(UNCpath))
+                {
+                    MessageBox.Show("The folder does not exist.");
+                    return;
+                }
+
+                txtFolder.Text = UNCpath;
             }
 
             // Collect installers from root and immediate child directories only (no deeper recursion)
