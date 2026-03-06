@@ -1,75 +1,86 @@
-📦 AutoInstallerApp
+🛠️ ToolsRunner
+Automatizador de ejecución de scripts PowerShell y herramientas internas.
+
 <details>
 <summary><strong>🇪🇸 Español</strong></summary>
-
 📝 Descripción del proyecto
-AutoInstallerApp es una herramienta en C# diseñada para automatizar la instalación de múltiples programas ubicados dentro de una carpeta.
-Su propósito es ahorrar tiempo, reducir la intervención del usuario y estandarizar procesos de instalación en equipos nuevos o entornos de despliegue.
-
-Incluye módulos adicionales como AutoInstallerAgent y autoclick, que permiten automatizar interacciones básicas con instaladores que no soportan modo silencioso.
+ToolsRunner es una utilidad diseñada para ejecutar scripts PowerShell (.ps1) de manera centralizada y organizada. El proyecto está construido en C# (.NET Desktop) y funciona como un lanzador que permite ejecutar herramientas internas, automatizaciones o rutinas administrativas sin necesidad de abrir manualmente cada script.
+El repositorio contiene:
+Scripts PowerShell para automatización
+Un proyecto en C# que actúa como “runner”
+Archivos de configuración básicos (.gitignore, .gitattributes)
+Estructura inicial lista para expandirse
 
 🚀 Características principales
-Instalación automática de múltiples instaladores en secuencia.
-Detección de archivos .exe y .msi.
-Arquitectura modular (App principal + Agent + autoclick).
-Proyecto 100% en C# (.NET Desktop).
-Ideal para técnicos, administradores de sistemas y automatización de entornos.
+Ejecución directa de scripts PowerShell desde una interfaz o ejecutable.
+Organización centralizada de herramientas internas.
+Proyecto ligero y fácil de extender.
+Ideal para entornos corporativos, IT, automatización y despliegues.
 
 📁 Estructura del repositorio
+Basado en el contenido del repositorio :
+
 Code
-AutoInstallerApp/
+ToolsRunner/
 │
-├── AutoInstallerApp.slnx
-├── AutoInstallerApp/
-├── AutoInstallerAgent/
-├── autoclick/
+├── ToolsRunner.slnx          # Solución principal
+├── ToolsRunner/              # Proyecto C#
+│   └── app.manifest
+│
+├── powershell .ps1 runner/   # Scripts PowerShell
 │
 ├── .gitignore
-└── .gitattributes
+├── .gitattributes
+└── README                    
 
 🧰 Tecnologías utilizadas
-C#
-.NET Desktop
-Automatización de Windows
+C# (.NET Desktop)
+PowerShell (.ps1)
+Windows Automation
 
-📌 Objetivo
-Simplificar y acelerar la instalación de múltiples programas sin intervención manual.
+🎯 Objetivo
+Centralizar y simplificar la ejecución de scripts administrativos, automatizaciones y herramientas internas mediante un ejecutable único.
 
 
 </details>
 
 <details>
 <summary><strong>🇺🇸 English</strong></summary>
-
 📝 Project Description
-AutoInstallerApp is a C# tool designed to automate the installation of multiple programs located inside a folder.
-Its purpose is to save time, reduce user interaction, and standardize installation workflows for new systems or deployment environments.
-
-The repository includes additional modules such as AutoInstallerAgent and autoclick, which help automate basic UI interactions for installers that do not support silent mode.
+ToolsRunner is a utility designed to execute PowerShell (.ps1) scripts in a centralized and organized way. The project is built in C# (.NET Desktop) and works as a launcher that allows running internal tools, automations, or administrative routines without manually opening each script.
+The repository includes:
+PowerShell automation scripts
+A C# project acting as a script runner
+Basic configuration files (.gitignore, .gitattributes)
+A clean structure ready for expansion
 
 🚀 Key Features
-Automatic sequential installation of multiple installers.
-Detection of .exe and .msi files.
-Modular architecture (Main App + Agent + autoclick).
-Fully built in C# (.NET Desktop).
-Ideal for technicians, sysadmins, and automation workflows.
+Direct execution of PowerShell scripts from an app or executable.
+Centralized organization of internal tools.
+Lightweight and easy to extend.
+Ideal for corporate environments, IT automation, and deployment workflows.
 
 📁 Repository Structure
+Based on the repository content :
+
 Code
-AutoInstallerApp/
+ToolsRunner/
 │
-├── AutoInstallerApp.slnx
-├── AutoInstallerApp/
-├── AutoInstallerAgent/
-├── autoclick/
+├── ToolsRunner.slnx
+├── ToolsRunner/
+│   └── app.manifest
+│
+├── powershell .ps1 runner/
 │
 ├── .gitignore
-└── .gitattributes
+├── .gitattributes
+└── README
 
 🧰 Technologies Used
-C#
-.NET Desktop
+C# (.NET Desktop)
+PowerShell (.ps1)
 Windows Automation
 
-📌 Purpose
-To simplify and accelerate the installation of multiple programs without manual intervention.
+🎯 Purpose
+Provide a simple and unified way to run administrative scripts, automations, and internal tools through a single executable.
+</details>
