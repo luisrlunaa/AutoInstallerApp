@@ -13,10 +13,10 @@ namespace AutoInstallerApp
             {
                 InitializeComponent();
                 // Initialize language resources and apply localized texts to controls (if resources available)
-                try { LanguageManager.ApplyToForm(this); } catch { }
+                try { LanguageManager.ApplyToForm(this); } catch (Exception ex) { Logger.WriteException(ex); }
 
                 // Listen for system locale/user preference changes to re-load language at runtime
-                try { Microsoft.Win32.SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged; this.FormClosed += Form1_FormClosed; } catch { }
+                try { Microsoft.Win32.SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged; this.FormClosed += Form1_FormClosed; } catch (Exception ex) { Logger.WriteException(ex); }
             }
             catch (Exception ex)
             {
@@ -25,7 +25,7 @@ namespace AutoInstallerApp
             }
 
             // Ensure STOP hidden initially
-            try { btnStop.Visible = false; } catch { }
+            try { btnStop.Visible = false; } catch (Exception ex) { Logger.WriteException(ex); }
 
             // Ensure progress label starts at 0% and is visible in front of the progress bar
             try
@@ -34,7 +34,7 @@ namespace AutoInstallerApp
                 progressBarlbl.Visible = true;
                 progressBarlbl.BringToFront();
             }
-            catch { }
+            catch (Exception ex) { Logger.WriteException(ex); }
 
             this.Load += Form1_Load;
             // Timer for elapsed time display
@@ -48,7 +48,7 @@ namespace AutoInstallerApp
 
         private void Form1_FormClosed(object? sender, FormClosedEventArgs e)
         {
-            try { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged; } catch { }
+            try { Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged; } catch (Exception ex) { Logger.WriteException(ex); }
         }
 
         private void SystemEvents_UserPreferenceChanged(object? sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
@@ -58,7 +58,7 @@ namespace AutoInstallerApp
                 if (e.Category == Microsoft.Win32.UserPreferenceCategory.Locale || e.Category == Microsoft.Win32.UserPreferenceCategory.General)
                 {
                     // Reinitialize language resources and reapply UI texts on the UI thread
-                    try { this.Invoke(() => { LanguageManager.ApplyToForm(this); }); } catch { }
+                    try { this.Invoke(() => { LanguageManager.ApplyToForm(this); }); } catch (Exception ex) { Logger.WriteException(ex); }
                 }
             }
             catch { }
@@ -147,10 +147,10 @@ namespace AutoInstallerApp
                                             f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase));
                             installersList.AddRange(childFiles);
                         }
-                        catch { }
+                            catch (Exception ex) { Logger.WriteException(ex); }
                     }
                 }
-                catch { }
+                catch (Exception ex) { Logger.WriteException(ex); }
             }
             catch (Exception ex)
             {
@@ -294,7 +294,7 @@ namespace AutoInstallerApp
                 }
                 catch (Exception ex)
                 {
-                    try { Logger.Write("[WARN] CouldNotPrepareFinalOrder: " + ex.Message); } catch { }
+                    try { Logger.WriteException(ex, "[WARN] CouldNotPrepareFinalOrder"); } catch { }
                 }
 
                 // === UI: Cambiar botones ===
@@ -309,7 +309,7 @@ namespace AutoInstallerApp
                         try { lblTimer.Text = "00:00:00"; } catch { }
                     }
                 }
-                catch { }
+            catch (Exception ex) { Logger.WriteException(ex); }
 
                 startTime = DateTime.Now;
                 try { uiTimer.Start(); } catch { }
@@ -386,11 +386,11 @@ namespace AutoInstallerApp
                         {
                             this.Invoke((Delegate)(() =>
                             {
-                                try { progressBar.Value = Math.Min(current, progressBar.Maximum); } catch { }
-                                try { progressBarlbl.Text = current.ToString() + "%"; } catch { }
+                                try { progressBar.Value = Math.Min(current, progressBar.Maximum); } catch (Exception ex) { Logger.WriteException(ex); }
+                                try { progressBarlbl.Text = current.ToString() + "%"; } catch (Exception ex) { Logger.WriteException(ex); }
                             }));
                         }
-                        catch { }
+                        catch (Exception ex) { Logger.WriteException(ex); }
                     };
 
                     await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, selected.Length, AddLog, progressCallback, cancelToken.Token);
@@ -429,7 +429,7 @@ namespace AutoInstallerApp
                 cancelToken = null;
 
                 // Stop elapsed timer (keep final elapsed value visible)
-                try { uiTimer.Stop(); } catch { }
+                try { uiTimer.Stop(); } catch (Exception ex) { Logger.WriteException(ex); }
             }
             catch (Exception ex)
             {
@@ -459,14 +459,22 @@ namespace AutoInstallerApp
                     listLog.TopIndex = listLog.Items.Count - 1;
                 });
             }
-            catch { }
+            catch (Exception ex) { Logger.WriteException(ex); }
 
             // Also persist UI-visible log lines to the disk log so they can be reported
             try
             {
                 Logger.Write(message);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                try
+                {
+                    var fallback = Path.Combine(Path.GetTempPath(), "AutoInstallerApp_logger_fallback.txt");
+                    File.AppendAllText(fallback, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] AddLog->Logger.Write failed: {ex}{Environment.NewLine}");
+                }
+                catch { }
+            }
         }
 
         private void btnStop_Click(object sender, EventArgs e)
@@ -486,7 +494,7 @@ namespace AutoInstallerApp
                 InstallerService.KillAllActiveProcesses();
                 AddLog("[STOP] Killed all active installer processes.");
                 // Stop elapsed timer (keep final elapsed value visible)
-                try { uiTimer.Stop(); } catch { }
+                try { uiTimer.Stop(); } catch (Exception ex) { Logger.WriteException(ex); }
             }
             catch (Exception ex)
             {

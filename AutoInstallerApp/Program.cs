@@ -22,23 +22,23 @@ namespace AutoInstallerApp
                     }
                     catch (Exception ex)
                     {
-                        try { Logger.Write("[AGENT FATAL] " + ex.ToString()); } catch { }
+                        try { Logger.WriteException(ex, "[AGENT FATAL]"); } catch { }
                     }
 
                     return;
                 }
             }
-            catch { }
+            catch (Exception ex) { Logger.WriteException(ex); }
             // Global exception handlers so we can capture startup crashes (useful for single-file apps)
             Application.ThreadException += (s, e) =>
             {
-                try { Logger.Write("[UI EXCEPTION] " + e.Exception.ToString()); } catch { }
-                try { MessageBox.Show("An unexpected error occurred:\n" + e.Exception.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error); } catch { }
+                try { Logger.WriteException(e.Exception, "[UI EXCEPTION]"); } catch { }
+                try { MessageBox.Show("An unexpected error occurred:\n" + e.Exception.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error); } catch (Exception ex) { Logger.WriteException(ex); }
             };
 
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
-                try { Logger.Write("[UNHANDLED EXCEPTION] " + (e.ExceptionObject?.ToString() ?? "(null)")); } catch { }
+                try { Logger.Write("[UNHANDLED EXCEPTION] " + (e.ExceptionObject?.ToString() ?? "(null)")); } catch (Exception ex) { Logger.WriteException(ex); }
             };
 
             try
@@ -51,8 +51,8 @@ namespace AutoInstallerApp
             }
             catch (Exception ex)
             {
-                try { Logger.Write("[FATAL] " + ex.ToString()); } catch { }
-                try { MessageBox.Show("The application failed to start:\n" + ex.Message, "Fatal error", MessageBoxButtons.OK, MessageBoxIcon.Error); } catch { }
+                try { Logger.WriteException(ex, "[FATAL]"); } catch { }
+                try { MessageBox.Show("The application failed to start:\n" + ex.Message, "Fatal error", MessageBoxButtons.OK, MessageBoxIcon.Error); } catch (Exception logEx) { Logger.WriteException(logEx); }
             }
         }
     }

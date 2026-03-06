@@ -1,0 +1,10 @@
+{
+  "office": " /configure configuration.xml",
+  "chrome": "--silent --do-not-launch-chrome",
+  "adobe": "/sAll /rs",
+  "acrobat": "/sAll /rs",
+  "sophos": "/quiet /norestart",
+  "inno": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+  "nsis": "/S",
+  "installshield": "/s"
+}

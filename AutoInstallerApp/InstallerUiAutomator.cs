@@ -9,6 +9,13 @@ namespace AutoInstallerApp
 {
     public static class InstallerUiAutomator
     {
+        // When enabled, the automator will press "final" buttons (Finish/Done/Close)
+        // even if other actionable buttons are present after a short wait. This
+        // helps fully-automatic flows where human confirmation is not desired.
+        public static bool AggressiveFinalClick = true;
+        // Maximum wait (ms) before forcing a final-only button click when in aggressive mode
+        public static int AggressiveFinalWaitMs = 5000;
+
         // Defaults are kept here so the automator works even if localization files are not present.
         private static readonly string[] CommonButtonNames = new[]
         {
@@ -109,7 +116,7 @@ namespace AutoInstallerApp
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
             if (hWnd == IntPtr.Zero)
             {
@@ -128,7 +135,7 @@ namespace AutoInstallerApp
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
             }
 
             if (hWnd == IntPtr.Zero)
@@ -167,7 +174,7 @@ namespace AutoInstallerApp
                             if (ppidObj != null) pp = Convert.ToInt32(ppidObj);
                             map[p] = pp;
                         }
-                        catch { }
+                catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                     }
                 }
 
@@ -229,13 +236,13 @@ namespace AutoInstallerApp
 
                     // Build list of windows for the process and its child PIDs
                     var windowList = new List<Window>();
-                    try
-                    {
-                        var mainWindows = app.GetAllTopLevelWindows(automation);
-                        if (mainWindows != null)
-                            windowList.AddRange(mainWindows);
-                    }
-                    catch { }
+                        try
+                        {
+                            var mainWindows = app.GetAllTopLevelWindows(automation);
+                            if (mainWindows != null)
+                                windowList.AddRange(mainWindows);
+                        }
+                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
                     try
                     {
@@ -249,10 +256,10 @@ namespace AutoInstallerApp
                                 if (cw != null)
                                     windowList.AddRange(cw);
                             }
-                            catch { }
+                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
                     // For each window, ensure a watcher task is running
                     foreach (var win in windowList)
@@ -267,13 +274,12 @@ namespace AutoInstallerApp
                                 var hv = win.Properties.NativeWindowHandle.Value;
                                 winHandle = Convert.ToInt32(hv);
                             }
-                            catch
-                            {
+                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } ;
                                 // cannot get handle -> skip
                                 continue;
                             }
                         }
-                        catch { continue; }
+                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } ; continue; }
                         if (winHandle == 0) continue;
 
                         if (!windowWatchers.ContainsKey(winHandle))
@@ -297,7 +303,7 @@ namespace AutoInstallerApp
                                                 if (isOffObj == true)
                                                     break;
                                             }
-                                            catch { }
+                                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
                                             // Process controls only within this window
                                             bool acted = false;
@@ -310,33 +316,33 @@ namespace AutoInstallerApp
                                                 AutomationElement? neededEdit = null;
                                                 foreach (var ed in edits)
                                                 {
-                                                    try
-                                                    {
-                                                        var ename = ed.Name ?? string.Empty;
-                                                        var labeledBy = ed.Properties.LabeledBy?.Value;
-                                                        var labelName = (labeledBy as AutomationElement)?.Name ?? string.Empty;
-
-                                                        string combined = (ename + " " + labelName).ToLowerInvariant();
-
-                                                        if (PasswordFieldWords.Any(w => combined.Contains(w)) || LicenseFieldWords.Any(w => combined.Contains(w)))
+                                                        try
                                                         {
-                                                            // read value if available
-                                                            string val = string.Empty;
-                                                            try
-                                                            {
-                                                                val = ed.Patterns.Value.PatternOrDefault?.Value ?? ed.AsTextBox()?.Text ?? string.Empty;
-                                                            }
-                                                            catch { }
+                                                            var ename = ed.Name ?? string.Empty;
+                                                            var labeledBy = ed.Properties.LabeledBy?.Value;
+                                                            var labelName = (labeledBy as AutomationElement)?.Name ?? string.Empty;
 
-                                                            if (string.IsNullOrWhiteSpace(val))
+                                                            string combined = (ename + " " + labelName).ToLowerInvariant();
+
+                                                            if (PasswordFieldWords.Any(w => combined.Contains(w)) || LicenseFieldWords.Any(w => combined.Contains(w)))
                                                             {
-                                                                needsInput = true;
-                                                                neededEdit = ed;
-                                                                break;
+                                                                // read value if available
+                                                                string val = string.Empty;
+                                                                try
+                                                                {
+                                                                    val = ed.Patterns.Value.PatternOrDefault?.Value ?? ed.AsTextBox()?.Text ?? string.Empty;
+                                                                }
+                                                                catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+
+                                                                if (string.IsNullOrWhiteSpace(val))
+                                                                {
+                                                                    needsInput = true;
+                                                                    neededEdit = ed;
+                                                                    break;
+                                                                }
                                                             }
                                                         }
-                                                    }
-                                                    catch { }
+                                                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                                                 }
 
                                                 if (needsInput && neededEdit != null)
@@ -381,7 +387,7 @@ namespace AutoInstallerApp
                                                                 if (resumed) break;
                                                             }
                                                         }
-                                                        catch { }
+                                                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
                                                         await Task.Delay(1000, wcts.Token).ConfigureAwait(false);
                                                     }
@@ -431,30 +437,53 @@ namespace AutoInstallerApp
                                                         if (isFinalOnly)
                                                         {
                                                             // determine if other actionable buttons exist
-                                                            bool otherActionableExists = false;
-                                                            foreach (var ob in btns)
+                                                            bool otherActionableExists()
                                                             {
                                                                 try
                                                                 {
-                                                                    var on = ob.Name ?? string.Empty;
-                                                                    if (string.IsNullOrWhiteSpace(on)) continue;
-                                                                    // skip negatives
-                                                                    if (NegativeButtonWords.Any(n => on.Contains(n, StringComparison.OrdinalIgnoreCase))) continue;
-                                                                    // if other final-only, ignore
-                                                                    if (FinalOnlyButtonNames.Any(fn => System.Text.RegularExpressions.Regex.IsMatch(on, $"\\b{System.Text.RegularExpressions.Regex.Escape(fn)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))) continue;
-                                                                    // if matches the common names (and is enabled) then it's another actionable option
-                                                                    if (CommonButtonNames.Any(t => System.Text.RegularExpressions.Regex.IsMatch(on, $"\\b{System.Text.RegularExpressions.Regex.Escape(t)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)))
+                                                                    foreach (var ob in capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button)))
                                                                     {
-                                                                        try { var obBtn = ob.AsButton(); if (obBtn != null && obBtn.IsEnabled) { otherActionableExists = true; break; } } catch { }
+                                                                        try
+                                                                        {
+                                                                            var on = ob.Name ?? string.Empty;
+                                                                            if (string.IsNullOrWhiteSpace(on)) continue;
+                                                                            // skip negatives
+                                                                            if (NegativeButtonWords.Any(n => on.Contains(n, StringComparison.OrdinalIgnoreCase))) continue;
+                                                                            // if other final-only, ignore
+                                                                            if (FinalOnlyButtonNames.Any(fn => System.Text.RegularExpressions.Regex.IsMatch(on, $"\\b{System.Text.RegularExpressions.Regex.Escape(fn)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))) continue;
+                                                                            // if matches the common names (and is enabled) then it's another actionable option
+                                                                            if (CommonButtonNames.Any(t => System.Text.RegularExpressions.Regex.IsMatch(on, $"\\b{System.Text.RegularExpressions.Regex.Escape(t)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)))
+                                                                            {
+                                                                                try { var obBtn = ob.AsButton(); if (obBtn != null && obBtn.IsEnabled) { return true; } } catch { }
+                                                                            }
+                                                                        }
+                                                                        catch { }
                                                                     }
                                                                 }
                                                                 catch { }
+
+                                                                return false;
                                                             }
 
-                                                            if (otherActionableExists)
+                                                            if (otherActionableExists())
                                                             {
-                                                                // skip pressing Finish/Done/Close if there are other options
-                                                                continue;
+                                                                if (AggressiveFinalClick)
+                                                                {
+                                                                    // Wait up to AggressiveFinalWaitMs for other actionables to disappear or become disabled
+                                                                    var waitUntil = DateTime.UtcNow + TimeSpan.FromMilliseconds(AggressiveFinalWaitMs);
+                                                                    while (DateTime.UtcNow < waitUntil && otherActionableExists() && !wcts.Token.IsCancellationRequested)
+                                                                    {
+                                                                        await Task.Delay(400, wcts.Token).ConfigureAwait(false);
+                                                                    }
+
+                                                                    // If still exists after wait, proceed anyway (force final click)
+                                                                    // otherwise fall through to press the final-only button normally
+                                                                }
+                                                                else
+                                                                {
+                                                                    // skip pressing Finish/Done/Close if there are other options and not in aggressive mode
+                                                                    continue;
+                                                                }
                                                             }
                                                         }
 
@@ -483,10 +512,10 @@ namespace AutoInstallerApp
                                                             }
                                                         }
                                                     }
-                                                    catch { }
+                                                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                                                 }
                                             }
-                                            catch { }
+                                                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
                                             if (acted)
                                                 await Task.Delay(700);
@@ -511,12 +540,12 @@ namespace AutoInstallerApp
                 // Cancel any remaining watchers
                 foreach (var kv in windowWatchers)
                 {
-                    try { kv.Value.Cancel(); } catch { }
+                    try { kv.Value.Cancel(); } catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                 }
 
                 logCallback?.Invoke($"[AUTOMATOR] Timeout reached for PID {pid}");
             }
-            catch { }
+                                                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
         }
     }
 }

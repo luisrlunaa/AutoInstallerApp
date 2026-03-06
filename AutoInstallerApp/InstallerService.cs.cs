@@ -15,37 +15,112 @@ namespace AutoInstallerApp
         // Named pipe used for agent communication
         private const string AgentPipeName = "AutoInstallerAgentPipe";
 
+        // Silent args mapping (loaded from silentArgs.json in application folder)
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> SilentArgs = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static bool SilentArgsLoaded = false;
+        private static string SilentArgsFile => Path.Combine(AppContext.BaseDirectory ?? AppContext.BaseDirectory, "silentArgs.json");
+
+        private static void LoadSilentArgs()
+        {
+            if (SilentArgsLoaded) return;
+            try
+            {
+                if (File.Exists(SilentArgsFile))
+                {
+                    try
+                    {
+                        var txt = File.ReadAllText(SilentArgsFile);
+                        var map = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(txt);
+                        if (map != null)
+                        {
+                            foreach (var kv in map)
+                            {
+                                SilentArgs.AddOrUpdate(kv.Key, kv.Value ?? string.Empty, (k, v) => kv.Value ?? string.Empty);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        try { Logger.WriteException(ex, "LoadSilentArgs:parse"); } catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try { Logger.WriteException(ex, "LoadSilentArgs"); } catch { }
+            }
+            finally { SilentArgsLoaded = true; }
+        }
+
+        private static string? GetSilentArgsForExecutable(string exeName)
+        {
+            try
+            {
+                if (!SilentArgsLoaded) LoadSilentArgs();
+                foreach (var kv in SilentArgs)
+                {
+                    try
+                    {
+                        if (exeName.IndexOf(kv.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                            return kv.Value;
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { try { Logger.WriteException(ex, "GetSilentArgsForExecutable"); } catch { } }
+            return null;
+        }
+
+        private static string? FindAutoHotkeyExe()
+        {
+            try
+            {
+                var appPath = AppContext.BaseDirectory ?? string.Empty;
+                var candidate = Path.Combine(appPath, "AutoHotkey.exe");
+                if (File.Exists(candidate)) return candidate;
+
+                var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+                foreach (var p in pathEnv.Split(Path.PathSeparator))
+                {
+                    try
+                    {
+                        var f = Path.Combine(p.Trim(), "AutoHotkey.exe");
+                        if (File.Exists(f)) return f;
+                    }
+                    catch { }
+                }
+
+                var tmp = Path.Combine(Path.GetTempPath(), "AutoHotkey.exe");
+                if (File.Exists(tmp)) return tmp;
+            }
+            catch (Exception ex) { try { Logger.WriteException(ex, "FindAutoHotkeyExe"); } catch { } }
+            return null;
+        }
+
         // Launch the same executable as an elevated agent (once). Returns true if agent launch was initiated.
         public static bool LaunchElevatedAgent(Action<string> logCallback)
         {
             try
             {
-                // Try to determine current executable path. For single-file apps Assembly.Location may be empty;
-                // prefer Process.MainModule, fall back to entry assembly location and finally AppContext.BaseDirectory.
+                // Determine current executable path
                 string? exe = null;
-                try { exe = Process.GetCurrentProcess().MainModule?.FileName; } catch { }
+                try { exe = Process.GetCurrentProcess().MainModule?.FileName; } catch (Exception ex) { try { Logger.WriteException(ex, "LaunchElevatedAgent:determine_exe"); } catch { } }
                 if (string.IsNullOrEmpty(exe))
                 {
-                    try { exe = System.Reflection.Assembly.GetEntryAssembly()?.Location; } catch { }
+                    try { exe = System.Reflection.Assembly.GetEntryAssembly()?.Location; } catch (Exception ex) { try { Logger.WriteException(ex, "LaunchElevatedAgent:entry_assembly"); } catch { } }
                 }
                 if (string.IsNullOrEmpty(exe))
                 {
-                    exe = AppContext.BaseDirectory; // last-resort: base directory (may not be full exe path)
+                    exe = AppContext.BaseDirectory; // fallback
                 }
                 if (string.IsNullOrEmpty(exe))
                     return false;
 
-                var psi = new ProcessStartInfo(exe, "--agent")
-                {
-                    UseShellExecute = true,
-                    Verb = "runas"
-                };
+                var psi = new ProcessStartInfo(exe, "--agent") { UseShellExecute = true, Verb = "runas" };
 
-                // Start elevated agent (user will see UAC)
-                Process? agent = null;
                 try
                 {
-                    agent = Process.Start(psi);
+                    var agent = Process.Start(psi);
                     if (agent == null)
                     {
                         logCallback?.Invoke("[AGENT ERROR] Failed to start elevated agent (Process.Start returned null).");
@@ -54,31 +129,30 @@ namespace AutoInstallerApp
 
                     logCallback?.Invoke($"[AGENT] Launched agent process PID={agent.Id}, HasExited={agent.HasExited}");
 
-                    // Log any recorded failure reasons so caller/UI can report them
                     try
                     {
                         if (!FailureReasons.IsEmpty)
                         {
-                            logCallback($"[ERROR] {FailureReasons.Count} installation failures recorded:");
+                            logCallback?.Invoke($"[ERROR] {FailureReasons.Count} installation failures recorded:");
                             foreach (var kv in FailureReasons)
                             {
                                 try
                                 {
                                     var name = Path.GetFileName(kv.Key);
-                                    logCallback($"  {name}: {kv.Value}");
+                                    logCallback?.Invoke($"  {name}: {kv.Value}");
                                     try { Logger.Write($"[ERROR] {name}: {kv.Value}"); } catch { }
                                 }
                                 catch { }
                             }
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { try { Logger.WriteException(ex, "LaunchElevatedAgent:logFailures"); } catch { } }
 
                     // Wait for agent to be ready by pinging the named pipe
                     logCallback?.Invoke("[INFO] Elevated agent started. Waiting for agent to accept pipe connections...");
 
                     var swatch = System.Diagnostics.Stopwatch.StartNew();
-                    int timeoutMs = 30000; // increased timeout for agent readiness
+                    int timeoutMs = 30000;
                     logCallback?.Invoke($"[AGENT] Waiting up to {timeoutMs}ms for agent to respond to ping...");
                     while (swatch.ElapsedMilliseconds < timeoutMs)
                     {
@@ -86,7 +160,6 @@ namespace AutoInstallerApp
                         {
                             using (var client = new System.IO.Pipes.NamedPipeClientStream(".", AgentPipeName, System.IO.Pipes.PipeDirection.InOut))
                             {
-                                // try connect with small timeout
                                 try { client.Connect(500); } catch { throw; }
                                 using (var sr = new System.IO.StreamReader(client, System.Text.Encoding.UTF8, false, 4096, leaveOpen: true))
                                 using (var sw = new System.IO.StreamWriter(client, System.Text.Encoding.UTF8, 4096, leaveOpen: true) { AutoFlush = true })
@@ -101,7 +174,7 @@ namespace AutoInstallerApp
                                 }
                             }
                         }
-                        catch { /* keep retrying */ }
+                        catch { /* retry */ }
 
                         Thread.Sleep(500);
                     }
@@ -112,10 +185,14 @@ namespace AutoInstallerApp
                 catch (Exception ex)
                 {
                     logCallback?.Invoke("[AGENT ERROR] Failed to start elevated agent: " + ex.Message);
+                    try { Logger.WriteException(ex, "LaunchElevatedAgent:start"); } catch { }
                     return false;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                try { Logger.WriteException(ex, "LaunchElevatedAgent"); } catch { }
+            }
 
             return false;
         }
@@ -180,6 +257,7 @@ namespace AutoInstallerApp
                     catch (Exception ex)
                     {
                         logCallback?.Invoke($"[AGENT ERROR] Attach attempt failed: {ex.Message}");
+                        try { Logger.WriteException(ex, "SendAttachCommandToAgent"); } catch { }
                     }
 
                     Thread.Sleep(700);
@@ -241,10 +319,14 @@ namespace AutoInstallerApp
                     catch (Exception ex)
                     {
                         try { logCallback?.Invoke($"[WARN] Could not pre-copy {Path.GetFileName(f)}: {ex.Message}"); } catch { }
+                        try { Logger.WriteException(ex, "PrepareLocalCopies"); } catch { }
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                try { Logger.WriteException(ex, "PrepareLocalCopies"); } catch { }
+            }
         }
 
         public static void RecordFailure(string file, string reason)
@@ -254,9 +336,12 @@ namespace AutoInstallerApp
                 if (string.IsNullOrEmpty(file)) return;
                 if (string.IsNullOrEmpty(reason)) reason = "(no details)";
                 FailureReasons.AddOrUpdate(file, reason, (k, v) => reason);
-                try { Logger.Write($"[FAILURE] {Path.GetFileName(file)}: {reason}"); } catch { }
+                try { Logger.WriteException(new Exception(reason), $"[FAILURE] {Path.GetFileName(file)}"); } catch { }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                try { Logger.WriteException(ex, "RecordFailure"); } catch { }
+            }
         }
 
         // Heuristic: detect if the program corresponding to the file is already installed
@@ -293,7 +378,10 @@ namespace AutoInstallerApp
                         }
                     }
                 }
-                catch { /* ignore log read errors and continue to registry checks */ }
+                catch (Exception ex)
+                {
+                    try { Logger.WriteException(ex, "IsProgramInstalled:read_log"); } catch { }
+                }
 
                 // 2) Check common uninstall registry keys for a matching display name
                 string[] roots = new[] {
@@ -316,7 +404,7 @@ namespace AutoInstallerApp
                                 if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(nameNoExt))
                                     return true;
                             }
-                            catch { }
+                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                         }
                     }
                 }
@@ -358,7 +446,7 @@ namespace AutoInstallerApp
                         try { proc.Kill(); } catch { }
                     }
                 }
-                catch { }
+                catch (Exception ex) { try { Logger.WriteException(ex, "KillAllActiveProcesses"); } catch { } }
                 finally
                 {
                     ActiveProcesses.TryRemove(kv.Key, out _);
@@ -469,7 +557,7 @@ namespace AutoInstallerApp
             var progressLock = new object();
 
             int maxDegree = 3;
-            try { maxDegree = Math.Max(1, Environment.ProcessorCount); } catch { }
+            try { maxDegree = Math.Max(1, Environment.ProcessorCount); } catch (Exception ex) { Logger.WriteException(ex); }
             // limit to a sensible maximum to avoid too many parallel installers
             maxDegree = Math.Min(maxDegree, 3);
 
@@ -480,6 +568,19 @@ namespace AutoInstallerApp
             {
                 if (token.IsCancellationRequested)
                     break;
+                
+                // Attempt to proactively start elevated agent so elevated UI can be automated
+                // This will prompt UAC once at start; if it fails we continue without agent.
+                try
+                {
+                    // Only try once per InstallAllAsync call
+                    if (!SilentArgsLoaded)
+                    {
+                        // load silent args mapping early
+                        try { LoadSilentArgs(); } catch { }
+                    }
+                }
+                catch (Exception ex) { try { Logger.WriteException(ex, "InstallAllAsync:preload"); } catch { } }
 
                 tasks.Add(Task.Run(async () =>
                 {
@@ -720,34 +821,43 @@ namespace AutoInstallerApp
                     {
                         logCallback($"[INFO] FlaUI no logró automatizar {name}. Probando AutoHotkey...");
 
-                        try
-                        {
-                            if (CurrentProcess == null || CurrentProcess.HasExited)
+                            try
                             {
-                                logCallback("[AHK] Cannot start AutoHotkey fallback: CurrentProcess is null or exited.");
-                                return false;
-                            }
-
-                            string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id);
-                            Process ahk = Process.Start("AutoHotkey.exe", $"\"{ahkScript}\"");
-
-                            while (!CurrentProcess.HasExited)
-                            {
-                                if (token.IsCancellationRequested)
+                                if (CurrentProcess == null || CurrentProcess.HasExited)
                                 {
-                                    try { ahk.Kill(); } catch { }
-                                    break;
+                                    logCallback("[AHK] Cannot start AutoHotkey fallback: CurrentProcess is null or exited.");
+                                    return false;
                                 }
-                                Thread.Sleep(300);
-                            }
 
-                            try { ahk.Kill(); } catch { }
-                            success = true;
-                        }
-                        catch (Exception ex)
-                        {
-                            logCallback($"[AHK ERROR] {ex.Message}");
-                        }
+                                string? ahkExe = FindAutoHotkeyExe();
+                                if (string.IsNullOrEmpty(ahkExe))
+                                {
+                                    logCallback("[AHK] AutoHotkey executable not found on PATH or app folder. Skipping AHK fallback.");
+                                }
+                                else
+                                {
+                                    string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id);
+                                    Process ahk = Process.Start(ahkExe, $"\"{ahkScript}\"");
+
+                                    while (!CurrentProcess.HasExited)
+                                    {
+                                        if (token.IsCancellationRequested)
+                                        {
+                                            try { ahk.Kill(); } catch { }
+                                            break;
+                                        }
+                                        Thread.Sleep(300);
+                                    }
+
+                                    try { ahk.Kill(); } catch { }
+                                    success = true;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                logCallback($"[AHK ERROR] {ex.Message}");
+                                try { Logger.WriteException(ex, "InstallAsync:AHKfallback"); } catch { }
+                            }
                     }
 
                     if (!token.IsCancellationRequested)
@@ -807,7 +917,15 @@ namespace AutoInstallerApp
                 "TSScan"
             };
 
-            return installerProcesses.Any(p => Process.GetProcessesByName(p).Length > 0);
+            try
+            {
+                return installerProcesses.Any(p => Process.GetProcessesByName(p).Length > 0);
+            }
+            catch (Exception ex)
+            {
+                try { Logger.WriteException(ex, "IsAnotherInstallerRunning"); } catch { }
+                return false;
+            }
         }
 
         // ============================
@@ -925,10 +1043,16 @@ namespace AutoInstallerApp
                     process.StartInfo.FileName = localFile;
 
                     // Determine appropriate silent arguments based on installer engine when possible
-                    if (nonSilentInstallers.Any(k => exeName.Contains(k)))
+                    var silentArgsMapped = GetSilentArgsForExecutable(exeName);
+                    if (!string.IsNullOrEmpty(silentArgsMapped))
+                    {
+                        process.StartInfo.Arguments = silentArgsMapped;
+                        logCallback?.Invoke($"[INFO] Using mapped silent args for '{exeName}': {silentArgsMapped}");
+                    }
+                    else if (nonSilentInstallers.Any(k => exeName.Contains(k)))
                     {
                         process.StartInfo.Arguments = "";
-                        logCallback("[INFO] Running without silent parameters (non-silent installer detected)");
+                        logCallback?.Invoke("[INFO] Running without silent parameters (non-silent installer detected)");
                     }
                     else
                     {
@@ -944,29 +1068,29 @@ namespace AutoInstallerApp
                                 exeContent = System.Text.Encoding.UTF8.GetString(buffer, 0, Math.Max(0, read));
                             }
                         }
-                        catch { }
+                        catch (Exception ex) { try { Logger.WriteException(ex, "RunInstaller:read_exe"); } catch { } }
 
                         if (!string.IsNullOrEmpty(exeContent) && exeContent.IndexOf("Inno Setup", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
                             process.StartInfo.Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART";
-                            logCallback("[INFO] Inno Setup detected, using Inno silent args");
+                            logCallback?.Invoke("[INFO] Inno Setup detected, using Inno silent args");
                         }
                         else if (!string.IsNullOrEmpty(exeContent) && (exeContent.IndexOf("Nullsoft", StringComparison.OrdinalIgnoreCase) >= 0 || exeContent.IndexOf("NSIS", StringComparison.OrdinalIgnoreCase) >= 0))
                         {
                             process.StartInfo.Arguments = "/S"; // NSIS silent
-                            logCallback("[INFO] NSIS/Nullsoft detected, using /S");
+                            logCallback?.Invoke("[INFO] NSIS/Nullsoft detected, using /S");
                         }
                         else if (!string.IsNullOrEmpty(exeContent) && exeContent.IndexOf("InstallShield", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
                             // InstallShield installers often support /s or msiexec-based silent; try /s as conservative option
                             process.StartInfo.Arguments = "/s";
-                            logCallback("[INFO] InstallShield detected, using /s (may require MSI wrapper)");
+                            logCallback?.Invoke("[INFO] InstallShield detected, using /s (may require MSI wrapper)");
                         }
                         else
                         {
                             // Generic fallback: common silent switches (some installers will ignore unknown params)
                             process.StartInfo.Arguments = "/silent";
-                            logCallback("[INFO] Using generic /silent argument as fallback");
+                            logCallback?.Invoke("[INFO] Using generic /silent argument as fallback");
                         }
                     }
                 }

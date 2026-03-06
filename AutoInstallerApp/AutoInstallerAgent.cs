@@ -38,11 +38,11 @@ namespace AutoInstallerApp.AutoInstallerAgent
                         var everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
                         ps.AddAccessRule(new PipeAccessRule(everyone, PipeAccessRights.ReadWrite, AccessControlType.Allow));
                     }
-                    catch { }
+                    catch (Exception ex) { Logger.WriteException(ex); }
 
                     using (var server = new NamedPipeServerStream(PipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Message, PipeOptions.Asynchronous))
                     {
-                        try { server.SetAccessControl(ps); } catch { }
+                        try { server.SetAccessControl(ps); } catch (Exception ex) { Logger.WriteException(ex); }
                         try
                         {
                             Logger.Write("[AGENT] Waiting for connection...");
@@ -66,12 +66,12 @@ namespace AutoInstallerApp.AutoInstallerAgent
                             }
                             catch (Exception ex)
                             {
-                                Logger.Write("[AGENT] ReadLine failed: " + ex.Message);
+                                Logger.WriteException(ex, "[AGENT] ReadLine failed");
                             }
 
                             if (string.IsNullOrWhiteSpace(request))
                             {
-                                try { sw.WriteLine("{\"status\":\"empty\"}"); } catch { }
+                                try { sw.WriteLine("{\"status\":\"empty\"}"); } catch (Exception ex) { Logger.WriteException(ex); }
                                 continue;
                             }
 
@@ -105,7 +105,7 @@ namespace AutoInstallerApp.AutoInstallerAgent
                                                         }
                                                     }
                                                 }
-                                                catch { }
+                                                catch (Exception ex) { Logger.WriteException(ex); }
 
                                                 Logger.Write($"[AGENT] Agent elevated: {agentIsElevated}");
 
@@ -137,12 +137,12 @@ namespace AutoInstallerApp.AutoInstallerAgent
                                                                 }
                                                             }
                                                         }
-                                                        catch { }
+                                                        catch (Exception ex) { Logger.WriteException(ex); }
                                                         Logger.Write($"[AGENT] Target owner: {owner}");
                                                     }
                                                     catch (Exception ex)
                                                     {
-                                                        Logger.Write($"[AGENT] Could not query target process info: {ex.Message}");
+                                                        Logger.WriteException(ex);
                                                     }
 
                                                     // Diagnostic: try OpenProcess to detect Access denied
@@ -162,7 +162,7 @@ namespace AutoInstallerApp.AutoInstallerAgent
                                                     }
                                                     catch (Exception ex)
                                                     {
-                                                        Logger.Write($"[AGENT] OpenProcess check exception: {ex.Message}");
+                                                        Logger.WriteException(ex);
                                                     }
                                                 }
                                                 catch (Exception ex)
@@ -172,14 +172,14 @@ namespace AutoInstallerApp.AutoInstallerAgent
 
                                                 // Use InstallerUiAutomator to attach and interact
                                                 string? pname = null;
-                                                try { pname = Process.GetProcessById(pid).ProcessName; } catch { }
+                                                try { pname = Process.GetProcessById(pid).ProcessName; } catch (Exception ex) { Logger.WriteException(ex); }
                                                 // use non-null log callback
-                                                Action<string> logcb = m => { try { Logger.Write("[AGENT LOG] " + m); } catch { } };
+                                                Action<string> logcb = m => { try { Logger.Write("[AGENT LOG] " + m); } catch (Exception ex) { Logger.WriteException(ex); } };
                                                 InstallerUiAutomator.InteractWithProcess(pid, logcb, CancellationToken.None, timeoutMs: 180000, processNameHint: pname);
                                             }
                                             catch (Exception ex)
                                             {
-                                                Logger.Write("[AGENT ERROR] " + ex.ToString());
+                                                Logger.WriteException(ex, "[AGENT ERROR]");
                                             }
                                         });
 
