@@ -404,7 +404,7 @@ namespace AutoInstallerApp
                                 if (!string.IsNullOrEmpty(displayName) && displayName.ToLower().Contains(nameNoExt))
                                     return true;
                             }
-                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                         }
                     }
                 }
@@ -568,7 +568,7 @@ namespace AutoInstallerApp
             {
                 if (token.IsCancellationRequested)
                     break;
-                
+
                 // Attempt to proactively start elevated agent so elevated UI can be automated
                 // This will prompt UAC once at start; if it fails we continue without agent.
                 try
@@ -821,43 +821,43 @@ namespace AutoInstallerApp
                     {
                         logCallback($"[INFO] FlaUI no logró automatizar {name}. Probando AutoHotkey...");
 
-                            try
+                        try
+                        {
+                            if (CurrentProcess == null || CurrentProcess.HasExited)
                             {
-                                if (CurrentProcess == null || CurrentProcess.HasExited)
-                                {
-                                    logCallback("[AHK] Cannot start AutoHotkey fallback: CurrentProcess is null or exited.");
-                                    return false;
-                                }
+                                logCallback("[AHK] Cannot start AutoHotkey fallback: CurrentProcess is null or exited.");
+                                return false;
+                            }
 
-                                string? ahkExe = FindAutoHotkeyExe();
-                                if (string.IsNullOrEmpty(ahkExe))
-                                {
-                                    logCallback("[AHK] AutoHotkey executable not found on PATH or app folder. Skipping AHK fallback.");
-                                }
-                                else
-                                {
-                                    string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id);
-                                    Process ahk = Process.Start(ahkExe, $"\"{ahkScript}\"");
+                            string? ahkExe = FindAutoHotkeyExe();
+                            if (string.IsNullOrEmpty(ahkExe))
+                            {
+                                logCallback("[AHK] AutoHotkey executable not found on PATH or app folder. Skipping AHK fallback.");
+                            }
+                            else
+                            {
+                                string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id);
+                                Process ahk = Process.Start(ahkExe, $"\"{ahkScript}\"");
 
-                                    while (!CurrentProcess.HasExited)
+                                while (!CurrentProcess.HasExited)
+                                {
+                                    if (token.IsCancellationRequested)
                                     {
-                                        if (token.IsCancellationRequested)
-                                        {
-                                            try { ahk.Kill(); } catch { }
-                                            break;
-                                        }
-                                        Thread.Sleep(300);
+                                        try { ahk.Kill(); } catch { }
+                                        break;
                                     }
-
-                                    try { ahk.Kill(); } catch { }
-                                    success = true;
+                                    Thread.Sleep(300);
                                 }
+
+                                try { ahk.Kill(); } catch { }
+                                success = true;
                             }
-                            catch (Exception ex)
-                            {
-                                logCallback($"[AHK ERROR] {ex.Message}");
-                                try { Logger.WriteException(ex, "InstallAsync:AHKfallback"); } catch { }
-                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logCallback($"[AHK ERROR] {ex.Message}");
+                            try { Logger.WriteException(ex, "InstallAsync:AHKfallback"); } catch { }
+                        }
                     }
 
                     if (!token.IsCancellationRequested)

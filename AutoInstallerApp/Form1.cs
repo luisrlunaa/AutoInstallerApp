@@ -112,7 +112,7 @@ namespace AutoInstallerApp
                 {
                     var newPath = folder.Split(":");
                     UNCpath = newPath.Length > 1 ? @"\\CORP.local\\PROCO" + newPath[1] : folder;
-                 }
+                }
 
                 if (!Directory.Exists(UNCpath))
                 {
@@ -147,7 +147,7 @@ namespace AutoInstallerApp
                                             f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase));
                             installersList.AddRange(childFiles);
                         }
-                            catch (Exception ex) { Logger.WriteException(ex); }
+                        catch (Exception ex) { Logger.WriteException(ex); }
                     }
                 }
                 catch (Exception ex) { Logger.WriteException(ex); }
@@ -309,7 +309,7 @@ namespace AutoInstallerApp
                         try { lblTimer.Text = "00:00:00"; } catch { }
                     }
                 }
-            catch (Exception ex) { Logger.WriteException(ex); }
+                catch (Exception ex) { Logger.WriteException(ex); }
 
                 startTime = DateTime.Now;
                 try { uiTimer.Start(); } catch { }

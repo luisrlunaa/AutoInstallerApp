@@ -174,7 +174,7 @@ namespace AutoInstallerApp
                             if (ppidObj != null) pp = Convert.ToInt32(ppidObj);
                             map[p] = pp;
                         }
-                catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                     }
                 }
 
@@ -236,13 +236,13 @@ namespace AutoInstallerApp
 
                     // Build list of windows for the process and its child PIDs
                     var windowList = new List<Window>();
-                        try
-                        {
-                            var mainWindows = app.GetAllTopLevelWindows(automation);
-                            if (mainWindows != null)
-                                windowList.AddRange(mainWindows);
-                        }
-                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                    try
+                    {
+                        var mainWindows = app.GetAllTopLevelWindows(automation);
+                        if (mainWindows != null)
+                            windowList.AddRange(mainWindows);
+                    }
+                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
                     try
                     {
@@ -274,12 +274,14 @@ namespace AutoInstallerApp
                                 var hv = win.Properties.NativeWindowHandle.Value;
                                 winHandle = Convert.ToInt32(hv);
                             }
-                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } ;
+                            catch (Exception ex)
+                            {
+                                try { Logger.WriteException(ex); } catch { };
                                 // cannot get handle -> skip
                                 continue;
                             }
                         }
-                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } ; continue; }
+                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { }; continue; }
                         if (winHandle == 0) continue;
 
                         if (!windowWatchers.ContainsKey(winHandle))
@@ -316,33 +318,33 @@ namespace AutoInstallerApp
                                                 AutomationElement? neededEdit = null;
                                                 foreach (var ed in edits)
                                                 {
-                                                        try
+                                                    try
+                                                    {
+                                                        var ename = ed.Name ?? string.Empty;
+                                                        var labeledBy = ed.Properties.LabeledBy?.Value;
+                                                        var labelName = (labeledBy as AutomationElement)?.Name ?? string.Empty;
+
+                                                        string combined = (ename + " " + labelName).ToLowerInvariant();
+
+                                                        if (PasswordFieldWords.Any(w => combined.Contains(w)) || LicenseFieldWords.Any(w => combined.Contains(w)))
                                                         {
-                                                            var ename = ed.Name ?? string.Empty;
-                                                            var labeledBy = ed.Properties.LabeledBy?.Value;
-                                                            var labelName = (labeledBy as AutomationElement)?.Name ?? string.Empty;
-
-                                                            string combined = (ename + " " + labelName).ToLowerInvariant();
-
-                                                            if (PasswordFieldWords.Any(w => combined.Contains(w)) || LicenseFieldWords.Any(w => combined.Contains(w)))
+                                                            // read value if available
+                                                            string val = string.Empty;
+                                                            try
                                                             {
-                                                                // read value if available
-                                                                string val = string.Empty;
-                                                                try
-                                                                {
-                                                                    val = ed.Patterns.Value.PatternOrDefault?.Value ?? ed.AsTextBox()?.Text ?? string.Empty;
-                                                                }
-                                                                catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                                                                val = ed.Patterns.Value.PatternOrDefault?.Value ?? ed.AsTextBox()?.Text ?? string.Empty;
+                                                            }
+                                                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
-                                                                if (string.IsNullOrWhiteSpace(val))
-                                                                {
-                                                                    needsInput = true;
-                                                                    neededEdit = ed;
-                                                                    break;
-                                                                }
+                                                            if (string.IsNullOrWhiteSpace(val))
+                                                            {
+                                                                needsInput = true;
+                                                                neededEdit = ed;
+                                                                break;
                                                             }
                                                         }
-                                                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                                                    }
+                                                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                                                 }
 
                                                 if (needsInput && neededEdit != null)
@@ -515,7 +517,7 @@ namespace AutoInstallerApp
                                                     catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
                                                 }
                                             }
-                                                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
 
                                             if (acted)
                                                 await Task.Delay(700);
@@ -545,7 +547,7 @@ namespace AutoInstallerApp
 
                 logCallback?.Invoke($"[AUTOMATOR] Timeout reached for PID {pid}");
             }
-                                                    catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
         }
     }
 }
