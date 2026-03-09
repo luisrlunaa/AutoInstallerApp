@@ -85,6 +85,154 @@ namespace AutoInstallerApp
             "activation code", "código de activación"
         };
 
+        // Attempt to resolve a .lnk shortcut to its target path using WScript.Shell COM
+        private static string? ResolveShortcutTarget(string lnkPath)
+        {
+            try
+            {
+                if (!File.Exists(lnkPath)) return null;
+                Type? wshType = Type.GetTypeFromProgID("WScript.Shell");
+                if (wshType == null) return null;
+                dynamic? shell = Activator.CreateInstance(wshType);
+                if (shell == null) return null;
+                dynamic lnk = shell.CreateShortcut(lnkPath);
+                string target = lnk.TargetPath as string ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(target)) return null;
+                return target;
+            }
+
+            catch { return null; }
+        }
+
+        // Try to find a 'sitekey' file near the installer path. Search installer dir, parent dirs and any resolved .lnk targets.
+        private static string? FindSiteKeyNearInstaller(string? installerPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(installerPath)) return null;
+                var dir = Path.GetDirectoryName(installerPath);
+                if (dir == null) return null;
+
+                // Check current dir and up to two parent levels
+                var candidates = new List<string>();
+                candidates.Add(Path.Combine(dir, "sitekey"));
+                candidates.Add(Path.Combine(dir, "sitekey.txt"));
+
+                var parent = Directory.GetParent(dir);
+                if (parent != null)
+                {
+                    candidates.Add(Path.Combine(parent.FullName, "sitekey"));
+                    candidates.Add(Path.Combine(parent.FullName, "sitekey.txt"));
+                }
+
+                var parent2 = parent?.Parent;
+                if (parent2 != null)
+                {
+                    candidates.Add(Path.Combine(parent2.FullName, "sitekey"));
+                    candidates.Add(Path.Combine(parent2.FullName, "sitekey.txt"));
+                }
+
+                foreach (var c in candidates)
+                {
+                    if (File.Exists(c)) return c;
+                }
+
+                // Also check for .lnk files in dir and parent that might point to the real install location
+                var lnkFiles = Directory.GetFiles(dir, "*.lnk", SearchOption.TopDirectoryOnly).ToList();
+                if (parent != null) lnkFiles.AddRange(Directory.GetFiles(parent.FullName, "*.lnk", SearchOption.TopDirectoryOnly));
+
+                foreach (var lnk in lnkFiles)
+                {
+                    var target = ResolveShortcutTarget(lnk);
+                    if (string.IsNullOrEmpty(target)) continue;
+                    string targetDir = Path.GetDirectoryName(target) ?? target;
+                    var candidate1 = Path.Combine(targetDir, "sitekey");
+                    var candidate2 = Path.Combine(targetDir, "sitekey.txt");
+                    if (File.Exists(candidate1)) return candidate1;
+                    if (File.Exists(candidate2)) return candidate2;
+                }
+
+                return null;
+            }
+            catch { return null; }
+        }
+
+        // Try to auto-fill TightVNC password fields (most TightVNC installers show 4 separate boxes)
+        private static bool TryAutoFillTightVnc(Window win, Action<string>? logCallback)
+        {
+            try
+            {
+                var title = win.AsWindow()?.Title ?? string.Empty;
+                var pid = win.Properties.ProcessId?.Value ?? 0;
+                var currentFile = InstallerService.CurrentFile ?? string.Empty;
+                if (!(title.IndexOf("tightvnc", StringComparison.OrdinalIgnoreCase) >= 0 || currentFile.IndexOf("tightvnc", StringComparison.OrdinalIgnoreCase) >= 0))
+                    return false;
+
+                var edits = win.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
+                if (edits == null || edits.Length < 1) return false;
+
+                // Some installers show a single password box; some show four. We'll fill up to 4 first edits.
+                var password = "aica";
+                int filled = 0;
+                foreach (var ed in edits)
+                {
+                    try
+                    {
+                        var tb = ed.AsTextBox();
+                        if (tb == null) continue;
+                        // set value
+                        tb.Text = password;
+                        filled++;
+                        try { var h = win.Properties.NativeWindowHandle?.Value; logCallback?.Invoke($"[AUTOMATOR] Auto-filled TightVNC password field (win {h}): {ed.Name}"); } catch { logCallback?.Invoke($"[AUTOMATOR] Auto-filled TightVNC password field: {ed.Name}"); }
+                        if (filled >= 4) break;
+                    }
+                    catch { }
+                }
+
+                return filled > 0;
+            }
+            catch { return false; }
+        }
+
+        // Try to auto-fill a license field using nearby 'sitekey' file
+        private static bool TryAutoFillLicense(Window win, Action<string>? logCallback)
+        {
+            try
+            {
+                var pid = win.Properties.ProcessId?.Value ?? 0;
+                var installerPath = InstallerService.CurrentFile;
+                var siteKeyPath = FindSiteKeyNearInstaller(installerPath);
+                if (siteKeyPath == null) return false;
+
+                string keyText = File.ReadAllText(siteKeyPath).Trim();
+                if (string.IsNullOrEmpty(keyText)) return false;
+
+                // Find first edit that looks like license field
+                var edits = win.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit));
+                foreach (var ed in edits)
+                {
+                    try
+                    {
+                        var ename = (ed.Name ?? string.Empty).ToLowerInvariant();
+                        if (LicenseFieldWords.Any(w => ename.Contains(w)))
+                        {
+                            var tb = ed.AsTextBox();
+                            if (tb != null)
+                            {
+                                tb.Text = keyText;
+                                logCallback?.Invoke($"[AUTOMATOR] Auto-filled license from {siteKeyPath} into field '{ed.Name}'");
+                                return true;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                return false;
+            }
+            catch { return false; }
+        }
+
         public static void InteractWithProcess(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs = 120000, string? processNameHint = null)
         {
             // Fire-and-forget the async worker; capture the returned Task to avoid analyzer warnings
@@ -97,6 +245,15 @@ namespace AutoInstallerApp
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetCursorPos(int X, int Y);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+        private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+        private const uint MOUSEEVENTF_LEFTUP = 0x0004;
 
         private static void SendEnterToWindow(Window win)
         {
@@ -276,7 +433,8 @@ namespace AutoInstallerApp
                             }
                             catch (Exception ex)
                             {
-                                try { Logger.WriteException(ex); } catch { };
+                                try { Logger.WriteException(ex); } catch { }
+                                ;
                                 // cannot get handle -> skip
                                 continue;
                             }
@@ -349,52 +507,69 @@ namespace AutoInstallerApp
 
                                                 if (needsInput && neededEdit != null)
                                                 {
-                                                    logCallback?.Invoke($"[AUTOMATOR] Waiting for user input for field related to '{neededEdit.Name}' in window {winHandle}");
-
-                                                    // Snapshot current buttons and title to detect user click/change later
-                                                    var beforeButtons = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button)).Select(x => x.Name ?? string.Empty).ToArray();
-                                                    var beforeTitle = capturedWin.AsWindow()?.Title ?? string.Empty;
-
-                                                    // Wait until the edit receives a value or the window changes (user clicked)
-                                                    bool resumed = false;
-                                                    while (!wcts.Token.IsCancellationRequested)
+                                                    // Try auto-fill heuristics first (TightVNC password or license file)
+                                                    bool autofilled = false;
+                                                    try { autofilled = TryAutoFillTightVnc(capturedWin, logCallback); } catch { }
+                                                    if (!autofilled)
                                                     {
-                                                        try
-                                                        {
-                                                            // Check if window closed/offscreen
-                                                            try { if (capturedWin.Properties.IsOffscreen?.Value == true) break; } catch { }
-
-                                                            // Re-check value
-                                                            string val2 = string.Empty;
-                                                            try { val2 = neededEdit.Patterns.Value.PatternOrDefault?.Value ?? neededEdit.AsTextBox()?.Text ?? string.Empty; } catch { }
-                                                            if (!string.IsNullOrWhiteSpace(val2))
-                                                            {
-                                                                // Now wait for user to click/advance: detect change in button set or title or control tree
-                                                                for (int i = 0; i < 120 && !wcts.Token.IsCancellationRequested; i++) // wait up to ~120s for user click/change
-                                                                {
-                                                                    try
-                                                                    {
-                                                                        var afterButtons = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button)).Select(x => x.Name ?? string.Empty).ToArray();
-                                                                        var afterTitle = capturedWin.AsWindow()?.Title ?? string.Empty;
-                                                                        if (afterTitle != beforeTitle || afterButtons.Length != beforeButtons.Length || !afterButtons.SequenceEqual(beforeButtons))
-                                                                        {
-                                                                            resumed = true;
-                                                                            break;
-                                                                        }
-                                                                    }
-                                                                    catch { }
-                                                                    await Task.Delay(1000, wcts.Token).ConfigureAwait(false);
-                                                                }
-
-                                                                if (resumed) break;
-                                                            }
-                                                        }
-                                                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
-
-                                                        await Task.Delay(1000, wcts.Token).ConfigureAwait(false);
+                                                        try { autofilled = TryAutoFillLicense(capturedWin, logCallback); } catch { }
                                                     }
 
-                                                    logCallback?.Invoke($"[AUTOMATOR] Resuming watcher for window {winHandle}");
+                                                    if (autofilled)
+                                                    {
+                                                        // Autofil completed; continue processing buttons immediately
+                                                        logCallback?.Invoke($"[AUTOMATOR] Auto-filled input for window {winHandle}");
+                                                        // do not pause waiting for user input
+                                                    }
+                                                    else
+                                                    {
+                                                        logCallback?.Invoke($"[AUTOMATOR] Waiting for user input for field related to '{neededEdit.Name}' in window {winHandle}");
+
+                                                        // Snapshot current buttons and title to detect user click/change later
+                                                        var beforeButtons = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button)).Select(x => x.Name ?? string.Empty).ToArray();
+                                                        var beforeTitle = capturedWin.AsWindow()?.Title ?? string.Empty;
+
+                                                        // Wait until the edit receives a value or the window changes (user clicked)
+                                                        bool resumed = false;
+                                                        while (!wcts.Token.IsCancellationRequested)
+                                                        {
+                                                            try
+                                                            {
+                                                                // Check if window closed/offscreen
+                                                                try { if (capturedWin.Properties.IsOffscreen?.Value == true) break; } catch { }
+
+                                                                // Re-check value
+                                                                string val2 = string.Empty;
+                                                                try { val2 = neededEdit.Patterns.Value.PatternOrDefault?.Value ?? neededEdit.AsTextBox()?.Text ?? string.Empty; } catch { }
+                                                                if (!string.IsNullOrWhiteSpace(val2))
+                                                                {
+                                                                    // Now wait for user to click/advance: detect change in button set or title or control tree
+                                                                    for (int i = 0; i < 120 && !wcts.Token.IsCancellationRequested; i++) // wait up to ~120s for user click/change
+                                                                    {
+                                                                        try
+                                                                        {
+                                                                            var afterButtons = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button)).Select(x => x.Name ?? string.Empty).ToArray();
+                                                                            var afterTitle = capturedWin.AsWindow()?.Title ?? string.Empty;
+                                                                            if (afterTitle != beforeTitle || afterButtons.Length != beforeButtons.Length || !afterButtons.SequenceEqual(beforeButtons))
+                                                                            {
+                                                                                resumed = true;
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                        catch { }
+                                                                        await Task.Delay(1000, wcts.Token).ConfigureAwait(false);
+                                                                    }
+
+                                                                    if (resumed) break;
+                                                                }
+                                                            }
+                                                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+
+                                                            await Task.Delay(1000, wcts.Token).ConfigureAwait(false);
+                                                        }
+
+                                                        logCallback?.Invoke($"[AUTOMATOR] Resuming watcher for window {winHandle}");
+                                                    }
                                                 }
                                             }
                                             catch { }
@@ -422,6 +597,13 @@ namespace AutoInstallerApp
                                                 }
 
                                                 // Check buttons
+                                                // First, special-case Sophos dialogs
+                                                try
+                                                {
+                                                    try { if (TryHandleSophos(capturedWin, logCallback)) { acted = true; } } catch { }
+                                                }
+                                                catch { }
+
                                                 var btns = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
                                                 foreach (var b in btns)
                                                 {
@@ -477,9 +659,6 @@ namespace AutoInstallerApp
                                                                     {
                                                                         await Task.Delay(400, wcts.Token).ConfigureAwait(false);
                                                                     }
-
-                                                                    // If still exists after wait, proceed anyway (force final click)
-                                                                    // otherwise fall through to press the final-only button normally
                                                                 }
                                                                 else
                                                                 {
@@ -510,11 +689,71 @@ namespace AutoInstallerApp
                                                                 catch
                                                                 {
                                                                     try { SendEnterToWindow(capturedWin); logCallback?.Invoke($"[AUTOMATOR] Sent Enter via SendInput → {name} (win {winHandle})"); acted = true; } catch { }
+                                                                    // Mouse click fallback on the button bounding rect
+                                                                    try
+                                                                    {
+                                                                        var rect = b.Properties.BoundingRectangle?.Value;
+                                                                        if (rect != null)
+                                                                        {
+                                                                            // BoundingRectangle provides X/Y/Width/Height
+                                                                            double left = rect.Value.X;
+                                                                            double top = rect.Value.Y;
+                                                                            double right = left + rect.Value.Width;
+                                                                            double bottom = top + rect.Value.Height;
+                                                                            int cx = (int)Math.Round((left + right) / 2.0);
+                                                                            int cy = (int)Math.Round((top + bottom) / 2.0);
+                                                                            try
+                                                                            {
+                                                                                SetCursorPos(cx, cy);
+                                                                                Thread.Sleep(80);
+                                                                                mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                                                                                mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                                                                                logCallback?.Invoke($"[AUTOMATOR] Mouse click fallback → {name} (win {winHandle}) at ({cx},{cy})");
+                                                                                acted = true;
+                                                                            }
+                                                                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                                                                        }
+                                                                    }
+                                                                    catch { }
                                                                 }
                                                             }
                                                         }
                                                     }
                                                     catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                                                }
+                                                // If no button acted, attempt an aggressive scan: find any descendant (non-button or custom) with a matching name and Invoke support
+                                                if (!acted)
+                                                {
+                                                    try
+                                                    {
+                                                        var allDesc = capturedWin.FindAllDescendants();
+                                                        foreach (var elem in allDesc)
+                                                        {
+                                                            try
+                                                            {
+                                                                // skip obvious buttons (already processed)
+                                                                if (elem.ControlType == ControlType.Button) continue;
+                                                                var en = elem.Name ?? string.Empty;
+                                                                if (string.IsNullOrWhiteSpace(en)) continue;
+                                                                if (!CommonButtonNames.Any(t => System.Text.RegularExpressions.Regex.IsMatch(en, $"\\b{System.Text.RegularExpressions.Regex.Escape(t)}\\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase)))
+                                                                    continue;
+                                                                if (NegativeButtonWords.Any(n => en.Contains(n, StringComparison.OrdinalIgnoreCase))) continue;
+                                                                if (elem.Patterns.Invoke.IsSupported)
+                                                                {
+                                                                    try
+                                                                    {
+                                                                        elem.Patterns.Invoke.PatternOrDefault?.Invoke();
+                                                                        logCallback?.Invoke($"[AUTOMATOR] Aggressive Invoke() → {en} (win {winHandle})");
+                                                                        acted = true;
+                                                                        break;
+                                                                    }
+                                                                    catch { }
+                                                                }
+                                                            }
+                                                            catch { }
+                                                        }
+                                                    }
+                                                    catch { }
                                                 }
                                             }
                                             catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }

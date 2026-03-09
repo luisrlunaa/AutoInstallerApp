@@ -6,6 +6,7 @@ namespace AutoInstallerApp
     public partial class Form1 : Form
     {
         private CancellationTokenSource? cancelToken;
+        private bool initializationFailed = false;
 
         public Form1()
         {
@@ -21,7 +22,14 @@ namespace AutoInstallerApp
             catch (Exception ex)
             {
                 try { Logger.Write("[INIT ERROR] " + ex.ToString()); } catch { }
-                throw;
+                // Do not rethrow - mark initialization failed and return early so the app remains running
+                initializationFailed = true;
+                try
+                {
+                    MessageBox.Show("The UI failed to initialize. See the log for details. The application will continue in limited mode.", "Initialization Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                catch { }
+                return;
             }
 
             // Ensure STOP hidden initially
@@ -45,6 +53,24 @@ namespace AutoInstallerApp
 
         private System.Windows.Forms.Timer uiTimer;
         private DateTime? startTime;
+
+        // Resolve a .lnk shortcut to its target (file or folder) using WScript.Shell
+        private static string? ResolveShortcutTarget(string lnkPath)
+        {
+            try
+            {
+                if (!File.Exists(lnkPath)) return null;
+                Type? wshType = Type.GetTypeFromProgID("WScript.Shell");
+                if (wshType == null) return null;
+                dynamic? shell = Activator.CreateInstance(wshType);
+                if (shell == null) return null;
+                dynamic lnk = shell.CreateShortcut(lnkPath);
+                string target = lnk.TargetPath as string ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(target)) return null;
+                return target;
+            }
+            catch { return null; }
+        }
 
         private void Form1_FormClosed(object? sender, FormClosedEventArgs e)
         {
@@ -149,6 +175,47 @@ namespace AutoInstallerApp
                         }
                         catch (Exception ex) { Logger.WriteException(ex); }
                     }
+
+                    // Also inspect .lnk shortcuts in root and immediate child directories. If a .lnk points
+                    // to a folder, scan that folder for installers; if it points to a file, add the file.
+                    try
+                    {
+                        var lnkFiles = Directory.GetFiles(folder, "*.lnk", SearchOption.TopDirectoryOnly).ToList();
+                        foreach (var d in childDirs)
+                        {
+                            try { lnkFiles.AddRange(Directory.GetFiles(d, "*.lnk", SearchOption.TopDirectoryOnly)); } catch { }
+                        }
+
+                        foreach (var lnk in lnkFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                var target = ResolveShortcutTarget(lnk);
+                                if (string.IsNullOrEmpty(target)) continue;
+
+                                if (Directory.Exists(target))
+                                {
+                                    try
+                                    {
+                                        var targetFiles = Directory.GetFiles(target, "*.*", SearchOption.TopDirectoryOnly)
+                                            .Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase));
+                                        installersList.AddRange(targetFiles);
+                                    }
+                                    catch { }
+                                }
+                                else if (File.Exists(target))
+                                {
+                                    var ext = Path.GetExtension(target) ?? string.Empty;
+                                    if (ext.Equals(".exe", StringComparison.OrdinalIgnoreCase) || ext.Equals(".msi", StringComparison.OrdinalIgnoreCase) || ext.Equals(".rdp", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        installersList.Add(target);
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch (Exception ex) { Logger.WriteException(ex); }
                 }
                 catch (Exception ex) { Logger.WriteException(ex); }
             }
@@ -164,6 +231,17 @@ namespace AutoInstallerApp
                 MessageBox.Show("No installers found.");
                 return;
             }
+
+            // Log discovered installers for debugging
+            try
+            {
+                AddLog("[DEBUG] Discovered installers:");
+                foreach (var it in installers)
+                {
+                    AddLog("  " + it);
+                }
+            }
+            catch { }
 
             // Determine selected installers: either all (if 'Install All' is checked) or from selection dialog
             try
@@ -234,12 +312,14 @@ namespace AutoInstallerApp
                     var selectedFileNames = new HashSet<string>(selected.Select(s => Path.GetFileName(s)), StringComparer.OrdinalIgnoreCase);
                     var specialFileNames = new HashSet<string>(specialInstallers.Select(s => Path.GetFileName(s)), StringComparer.OrdinalIgnoreCase);
 
-                    // Start with Office (if any) — choose first match from selected (preserve full path)
+                    // Identify Office installer (if any) — remove from selected and postpone adding to the very end
+                    string? officePath = null;
                     if (hasOffice)
                     {
-                        var officePath = officeCandidates.First();
-                        finalOrderNames.Add(officePath);
+                        officePath = officeCandidates.First();
+                        // remove office from the immediate selected list so it won't run early
                         selected = selected.Where(s => !Path.GetFileName(s).Equals(Path.GetFileName(officePath), StringComparison.OrdinalIgnoreCase)).ToArray();
+                        AddLog("[INFO] Office installer detected; it will be scheduled to run last.");
                     }
 
                     // Then append the specific tail installers if present (from selected or special folder), in the given order
@@ -279,14 +359,22 @@ namespace AutoInstallerApp
                         }
                     }
 
-                    // Compose final selection: original selected (remaining, preserving order) followed by finalOrderNames
+                    // Compose final selection: remaining selected (preserving order), then tail finalOrderNames,
+                    // and finally the Office installer (if any) to ensure Office runs last
                     var finalSelectedList = new List<string>();
                     finalSelectedList.AddRange(selected);
-                    // ensure we append only files that actually exist and are not duplicates
+                    // append tail installers (finalOrderNames) if not duplicates
                     foreach (var f in finalOrderNames)
                     {
                         if (!finalSelectedList.Any(existing => Path.GetFileName(existing).Equals(Path.GetFileName(f), StringComparison.OrdinalIgnoreCase)))
                             finalSelectedList.Add(f);
+                    }
+
+                    // Finally append Office installer as the very last item
+                    if (!string.IsNullOrEmpty(officePath))
+                    {
+                        if (!finalSelectedList.Any(existing => Path.GetFileName(existing).Equals(Path.GetFileName(officePath), StringComparison.OrdinalIgnoreCase)))
+                            finalSelectedList.Add(officePath!);
                     }
 
                     selected = finalSelectedList.ToArray();

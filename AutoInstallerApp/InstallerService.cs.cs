@@ -543,6 +543,17 @@ namespace AutoInstallerApp
                 return;
             }
 
+            // Debug: log final processing order
+            try
+            {
+                logCallback("[DEBUG] Final processing order:");
+                foreach (var f in all)
+                {
+                    try { logCallback("  " + f); } catch { }
+                }
+            }
+            catch { }
+
             logCallback("[INFO] Starting ALL installers in parallel (conflicts will be postponed)...");
 
             var failed = new ConcurrentBag<string>();
@@ -972,10 +983,10 @@ namespace AutoInstallerApp
 
                         try
                         {
-                            automatorCtsOffice = CancellationTokenSource.CreateLinkedTokenSource(token);
-                            string? pnameOffice = null;
-                            try { pnameOffice = Path.GetFileNameWithoutExtension(file); } catch { }
-                            InstallerUiAutomator.InteractWithProcess(office.Id, logCallback, automatorCtsOffice.Token, processNameHint: pnameOffice);
+                                automatorCtsOffice = CancellationTokenSource.CreateLinkedTokenSource(token);
+                                string? pnameOffice = null;
+                                try { pnameOffice = Path.GetFileNameWithoutExtension(file); } catch { }
+                                InstallerUiAutomator.InteractWithProcess(office.Id, logCallback, automatorCtsOffice.Token, processNameHint: pnameOffice);
                         }
                         catch { }
 
@@ -1115,13 +1126,13 @@ namespace AutoInstallerApp
 
                     try
                     {
-                        automatorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                        // If this process was started elevated and our process is not elevated, launching a helper
-                        // may be necessary. We still start background automator here; the separate helper exists
-                        // for scenarios where the app can spawn an elevated agent.
-                        string? pname = null;
-                        try { pname = Path.GetFileNameWithoutExtension(localFile); } catch { }
-                        InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token, processNameHint: pname);
+                            automatorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                            // If this process was started elevated and our process is not elevated, launching a helper
+                            // may be necessary. We still start background automator here; the separate helper exists
+                            // for scenarios where the app can spawn an elevated agent.
+                            string? pname = null;
+                            try { pname = Path.GetFileNameWithoutExtension(localFile); } catch { }
+                            InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token, processNameHint: pname);
                     }
                     catch { }
 
