@@ -119,22 +119,16 @@ namespace AutoInstallerApp
         {
             try
             {
-                // Determine current executable path
                 string? exe = null;
-                try { exe = Process.GetCurrentProcess().MainModule?.FileName; } catch (Exception ex) { try { Logger.WriteException(ex, "LaunchElevatedAgent:determine_exe"); } catch { } }
+                try { exe = Process.GetCurrentProcess().MainModule?.FileName; } catch { }
                 if (string.IsNullOrEmpty(exe))
                 {
-                    try { exe = System.Reflection.Assembly.GetEntryAssembly()?.Location; } catch (Exception ex) { try { Logger.WriteException(ex, "LaunchElevatedAgent:entry_assembly"); } catch { } }
+                    try { exe = System.Reflection.Assembly.GetEntryAssembly()?.Location; } catch { }
                 }
-                if (string.IsNullOrEmpty(exe))
-                {
-                    exe = AppContext.BaseDirectory; // fallback
-                }
-                if (string.IsNullOrEmpty(exe))
-                    return false;
+                if (string.IsNullOrEmpty(exe)) exe = AppContext.BaseDirectory;
+                if (string.IsNullOrEmpty(exe)) return false;
 
                 var psi = new ProcessStartInfo(exe, "--agent") { UseShellExecute = true, Verb = "runas" };
-
                 try
                 {
                     var agent = Process.Start(psi);
@@ -146,53 +140,26 @@ namespace AutoInstallerApp
 
                     logCallback?.Invoke($"[AGENT] Launched agent process PID={agent.Id}, HasExited={agent.HasExited}");
 
-                    try
-                    {
-                        if (!FailureReasons.IsEmpty)
-                        {
-                            logCallback?.Invoke($"[ERROR] {FailureReasons.Count} installation failures recorded:");
-                            foreach (var kv in FailureReasons)
-                            {
-                                try
-                                {
-                                    var name = Path.GetFileName(kv.Key);
-                                    logCallback?.Invoke($"  {name}: {kv.Value}");
-                                    try { Logger.Write($"[ERROR] {name}: {kv.Value}"); } catch { }
-                                }
-                                catch { }
-                            }
-                        }
-                    }
-                    catch (Exception ex) { try { Logger.WriteException(ex, "LaunchElevatedAgent:logFailures"); } catch { } }
-
-                    // Wait for agent to be ready by pinging the named pipe
-                    logCallback?.Invoke("[INFO] Elevated agent started. Waiting for agent to accept pipe connections...");
-
-                    var swatch = System.Diagnostics.Stopwatch.StartNew();
+                    // Wait for agent to respond on the named pipe
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
                     int timeoutMs = 30000;
-                    logCallback?.Invoke($"[AGENT] Waiting up to {timeoutMs}ms for agent to respond to ping...");
-                    while (swatch.ElapsedMilliseconds < timeoutMs)
+                    while (sw.ElapsedMilliseconds < timeoutMs)
                     {
                         try
                         {
-                            using (var client = new System.IO.Pipes.NamedPipeClientStream(".", AgentPipeName, System.IO.Pipes.PipeDirection.InOut))
+                            using var client = new System.IO.Pipes.NamedPipeClientStream(".", AgentPipeName, System.IO.Pipes.PipeDirection.InOut);
+                            client.Connect(500);
+                            using var sr = new System.IO.StreamReader(client, System.Text.Encoding.UTF8, false, 4096, leaveOpen: true);
+                            using var swr = new System.IO.StreamWriter(client, System.Text.Encoding.UTF8, 4096, leaveOpen: true) { AutoFlush = true };
+                            swr.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { cmd = "ping" }));
+                            string? resp = sr.ReadLine();
+                            if (resp != null && resp.Contains("pong"))
                             {
-                                try { client.Connect(500); } catch { throw; }
-                                using (var sr = new System.IO.StreamReader(client, System.Text.Encoding.UTF8, false, 4096, leaveOpen: true))
-                                using (var sw = new System.IO.StreamWriter(client, System.Text.Encoding.UTF8, 4096, leaveOpen: true) { AutoFlush = true })
-                                {
-                                    sw.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { cmd = "ping" }));
-                                    string? resp = sr.ReadLine();
-                                    if (resp != null && resp.Contains("pong"))
-                                    {
-                                        logCallback?.Invoke("[AGENT] Agent responded to ping.");
-                                        return true;
-                                    }
-                                }
+                                logCallback?.Invoke("[AGENT] Agent responded to ping.");
+                                return true;
                             }
                         }
-                        catch { /* retry */ }
-
+                        catch { }
                         Thread.Sleep(500);
                     }
 
@@ -201,17 +168,16 @@ namespace AutoInstallerApp
                 }
                 catch (Exception ex)
                 {
-                    logCallback?.Invoke("[AGENT ERROR] Failed to start elevated agent: " + ex.Message);
                     try { Logger.WriteException(ex, "LaunchElevatedAgent:start"); } catch { }
+                    logCallback?.Invoke("[AGENT ERROR] Failed to start elevated agent: " + ex.Message);
                     return false;
                 }
             }
             catch (Exception ex)
             {
                 try { Logger.WriteException(ex, "LaunchElevatedAgent"); } catch { }
+                return false;
             }
-
-            return false;
         }
 
         // Send attach command to agent via named pipe. Waits briefly for agent to accept.
@@ -546,83 +512,64 @@ namespace AutoInstallerApp
             Action<int>? progressCallback,
             CancellationToken token)
         {
-            // Merge all installers so we attempt to start them all in parallel.
-            var all = new List<string>(lowRisk.Count + mediumRisk.Count + highRisk.Count + rdpFiles.Count);
-            all.AddRange(lowRisk);
-            all.AddRange(mediumRisk);
-            all.AddRange(highRisk);
-            // Include the rdp copy steps as items to process so progress counts them
-            all.AddRange(rdpFiles);
+            // Run low/medium/rdp in parallel, but force highRisk installers to run sequentially
+            var parallelItems = new List<string>(lowRisk.Count + mediumRisk.Count + rdpFiles.Count);
+            parallelItems.AddRange(lowRisk);
+            parallelItems.AddRange(mediumRisk);
+            parallelItems.AddRange(rdpFiles);
 
-            if (all.Count == 0)
+            if ((parallelItems.Count + highRisk.Count) == 0)
             {
                 logCallback("[INFO] No installers to run.");
                 return;
             }
 
-            // Debug: log final processing order
+            // Debug: log processing order
             try
             {
-                logCallback("[DEBUG] Final processing order:");
-                foreach (var f in all)
-                {
-                    try { logCallback("  " + f); } catch { }
-                }
+                logCallback("[DEBUG] Parallel processing items:");
+                foreach (var f in parallelItems) try { logCallback("  " + f); } catch { }
+                logCallback("[DEBUG] HighRisk (sequential) items:");
+                foreach (var f in highRisk) try { logCallback("  " + f); } catch { }
             }
             catch { }
 
-            logCallback("[INFO] Starting ALL installers in parallel (conflicts will be postponed)...");
+            logCallback("[INFO] Starting installers (parallel for low/medium, sequential for high risk)...");
 
             var failed = new ConcurrentBag<string>();
             var postponed = new ConcurrentBag<string>();
             int progressCount = 0;
-            int totalItems = all.Count; // now includes rdp copy actions
+            int totalItems = parallelItems.Count + highRisk.Count; // includes rdp copy actions
             if (totalItems == 0) totalItems = 1;
 
-            // Smooth progress accumulation: compute fractional value per item and accumulate in a thread-safe way
             double valorPorTarea = 100.0 / totalItems;
             double acumulado = 0.0;
             var progressLock = new object();
 
             int maxDegree = 3;
             try { maxDegree = Math.Max(1, Environment.ProcessorCount); } catch (Exception ex) { Logger.WriteException(ex); }
-            // limit to a sensible maximum to avoid too many parallel installers
             maxDegree = Math.Min(maxDegree, 3);
 
             var semaphore = new SemaphoreSlim(maxDegree);
             var tasks = new List<Task>();
 
-            foreach (var file in all)
+            // Parallel phase
+            foreach (var file in parallelItems)
             {
-                if (token.IsCancellationRequested)
-                    break;
+                if (token.IsCancellationRequested) break;
 
-                // Attempt to proactively start elevated agent so elevated UI can be automated
-                // This will prompt UAC once at start; if it fails we continue without agent.
-                try
-                {
-                    // Only try once per InstallAllAsync call
-                    if (!SilentArgsLoaded)
-                    {
-                        // load silent args mapping early
-                        try { LoadSilentArgs(); } catch { }
-                    }
-                }
-                catch (Exception ex) { try { Logger.WriteException(ex, "InstallAllAsync:preload"); } catch { } }
+                try { if (!SilentArgsLoaded) { try { LoadSilentArgs(); } catch { } } } catch { }
 
                 tasks.Add(Task.Run(async () =>
                 {
                     await semaphore.WaitAsync(token).ConfigureAwait(false);
                     try
                     {
-                        if (token.IsCancellationRequested)
-                            return;
+                        if (token.IsCancellationRequested) return;
 
-                        // Publish current file so UI can request skip
                         CurrentFile = file;
                         StartedOrder.Enqueue(file);
 
-                        // If program appears already installed, skip it
                         try
                         {
                             if (IsProgramInstalled(file))
@@ -633,11 +580,7 @@ namespace AutoInstallerApp
                                 {
                                     Interlocked.Increment(ref progressCount);
                                     int percent;
-                                    lock (progressLock)
-                                    {
-                                        acumulado += valorPorTarea;
-                                        percent = (int)Math.Round(acumulado);
-                                    }
+                                    lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); }
                                     try { progressCallback?.Invoke(percent); } catch { }
                                 }
                                 return;
@@ -645,131 +588,85 @@ namespace AutoInstallerApp
                         }
                         catch { }
 
-                        // If another installer is already active, wait a bit (instead of postponing) to avoid losing the item
                         if (IsAnotherInstallerRunning())
                         {
                             logCallback($"[CONFLICT] Another installer active - waiting briefly before running {Path.GetFileName(file)}");
                             WaitForInstallerToBeFree(logCallback, token);
                         }
 
-                        // Handle RDP copy items directly (do not try to run them as installers)
                         if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                         {
-                            try
-                            {
-                                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                                string dest = Path.Combine(desktop, Path.GetFileName(file));
-                                File.Copy(file, dest, true);
-                                logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
-                            }
-                            catch (Exception ex)
-                            {
-                                logCallback($"[RDP COPY ERROR] {file}: {ex.Message}");
-                                failed.Add(file);
-                            }
+                            try { string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); string dest = Path.Combine(desktop, Path.GetFileName(file)); File.Copy(file, dest, true); logCallback($"[RDP COPIED] {Path.GetFileName(file)}"); }
+                            catch (Exception ex) { logCallback($"[RDP COPY ERROR] {file}: {ex.Message}"); failed.Add(file); }
 
-                            if (Completed.TryAdd(file, true))
-                            {
-                                Interlocked.Increment(ref progressCount);
-                                int percent;
-                                lock (progressLock)
-                                {
-                                    acumulado += valorPorTarea;
-                                    percent = (int)Math.Round(acumulado);
-                                }
-                                try { progressCallback?.Invoke(percent); } catch { }
-                            }
-
+                            if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
                             return;
                         }
 
                         bool ok = false;
-                        try
-                        {
-                            ok = await InstallAsync(file, logCallback, token).ConfigureAwait(false);
-                        }
-                        catch
-                        {
-                            ok = false;
-                        }
+                        try { ok = await InstallAsync(file, logCallback, token).ConfigureAwait(false); } catch { ok = false; }
 
-                        if (!ok)
-                            failed.Add(file);
-                        else
-                        {
-                            // mark completed only once and update progress as percentage
-                            if (Completed.TryAdd(file, true))
-                            {
-                                Interlocked.Increment(ref progressCount);
-                                int percent;
-                                lock (progressLock)
-                                {
-                                    acumulado += valorPorTarea;
-                                    percent = (int)Math.Round(acumulado);
-                                }
-                                try { progressCallback?.Invoke(percent); } catch { }
-                            }
-                        }
+                        if (!ok) failed.Add(file);
+                        else { if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } } }
                     }
-                    finally
-                    {
-                        semaphore.Release();
-                    }
+                    finally { semaphore.Release(); }
                 }, token));
             }
 
-            try
-            {
-                await Task.WhenAll(tasks);
-            }
-            catch { }
+            try { await Task.WhenAll(tasks); } catch { }
 
+            // Sequential highRisk phase
+            if (!token.IsCancellationRequested)
+            {
+                foreach (var file in highRisk)
+                {
+                    if (token.IsCancellationRequested) break;
+
+                    CurrentFile = file;
+                    StartedOrder.Enqueue(file);
+
+                    try
+                    {
+                        if (IsProgramInstalled(file))
+                        {
+                            var name = Path.GetFileName(file);
+                            logCallback($"[SKIPPED - ALREADY INSTALLED] {name}");
+                            if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
+                            continue;
+                        }
+                    }
+                    catch { }
+
+                    if (IsAnotherInstallerRunning()) { logCallback($"[CONFLICT] Another installer active - waiting before running {Path.GetFileName(file)}"); WaitForInstallerToBeFree(logCallback, token); }
+
+                    bool ok = false;
+                    try { ok = await InstallAsync(file, logCallback, token).ConfigureAwait(false); } catch { ok = false; }
+
+                    if (!ok) failed.Add(file);
+                    else { if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } } }
+                }
+            }
+
+            // After both phases, retry failures sequentially
             if (!failed.IsEmpty)
             {
-                logCallback($"[INFO] {failed.Count} installers failed during parallel run. Retrying sequentially...");
+                logCallback($"[INFO] {failed.Count} installers failed during initial run. Retrying sequentially...");
 
                 foreach (var f in failed)
                 {
-                    if (token.IsCancellationRequested)
-                        break;
+                    if (token.IsCancellationRequested) break;
 
-
-                    // Sequential retry: InstallAsync will attempt elevation if needed
                     if (f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                     {
-                        try
-                        {
-                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                            string dest = Path.Combine(desktop, Path.GetFileName(f));
-                            File.Copy(f, dest, true);
-                            logCallback($"[RDP COPIED] {Path.GetFileName(f)}");
-                        }
-                        catch (Exception ex)
-                        {
-                            logCallback($"[RDP COPY ERROR] {f}: {ex.Message}");
-                        }
+                        try { string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); string dest = Path.Combine(desktop, Path.GetFileName(f)); File.Copy(f, dest, true); logCallback($"[RDP COPIED] {Path.GetFileName(f)}"); }
+                        catch (Exception ex) { logCallback($"[RDP COPY ERROR] {f}: {ex.Message}"); }
 
-                        if (Completed.TryAdd(f, true))
-                        {
-                            Interlocked.Increment(ref progressCount);
-                            int percent;
-                            lock (progressLock)
-                            {
-                                acumulado += valorPorTarea;
-                                percent = (int)Math.Round(acumulado);
-                            }
-                            try { progressCallback?.Invoke(percent); } catch { }
-                        }
+                        if (Completed.TryAdd(f, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
                     }
                     else
                     {
                         await InstallAsync(f, logCallback, token);
-                        if (Completed.TryAdd(f, true))
-                        {
-                            var completedCount = Interlocked.Increment(ref progressCount);
-                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
-                            try { progressCallback?.Invoke(percent); } catch { }
-                        }
+                        if (Completed.TryAdd(f, true)) { var completedCount = Interlocked.Increment(ref progressCount); int percent = (int)Math.Round(100.0 * completedCount / totalItems); try { progressCallback?.Invoke(percent); } catch { } }
                     }
                 }
             }
@@ -781,44 +678,19 @@ namespace AutoInstallerApp
 
                 foreach (var p in postponed)
                 {
-                    if (token.IsCancellationRequested)
-                        break;
+                    if (token.IsCancellationRequested) break;
 
                     if (p.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                     {
-                        try
-                        {
-                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                            string dest = Path.Combine(desktop, Path.GetFileName(p));
-                            File.Copy(p, dest, true);
-                            logCallback($"[RDP COPIED] {Path.GetFileName(p)}");
-                        }
-                        catch (Exception ex)
-                        {
-                            logCallback($"[RDP COPY ERROR] {p}: {ex.Message}");
-                        }
+                        try { string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); string dest = Path.Combine(desktop, Path.GetFileName(p)); File.Copy(p, dest, true); logCallback($"[RDP COPIED] {Path.GetFileName(p)}"); }
+                        catch (Exception ex) { logCallback($"[RDP COPY ERROR] {p}: {ex.Message}"); }
 
-                        if (Completed.TryAdd(p, true))
-                        {
-                            Interlocked.Increment(ref progressCount);
-                            int percent;
-                            lock (progressLock)
-                            {
-                                acumulado += valorPorTarea;
-                                percent = (int)Math.Round(acumulado);
-                            }
-                            try { progressCallback?.Invoke(percent); } catch { }
-                        }
+                        if (Completed.TryAdd(p, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
                     }
                     else
                     {
                         await InstallAsync(p, logCallback, token);
-                        if (Completed.TryAdd(p, true))
-                        {
-                            var completedCount = Interlocked.Increment(ref progressCount);
-                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
-                            try { progressCallback?.Invoke(percent); } catch { }
-                        }
+                        if (Completed.TryAdd(p, true)) { var completedCount = Interlocked.Increment(ref progressCount); int percent = (int)Math.Round(100.0 * completedCount / totalItems); try { progressCallback?.Invoke(percent); } catch { } }
                     }
                 }
             }
@@ -1107,6 +979,29 @@ namespace AutoInstallerApp
                 try
                 {
                     lock (ProcessLock) { CurrentProcess = process; }
+
+                    // If a sitekey.txt exists in the installer folder, publish it to a temp file
+                    try
+                    {
+                        string folderPath = Path.GetDirectoryName(localFile) ?? Path.GetDirectoryName(file) ?? string.Empty;
+                        string siteKeyPath = Path.Combine(folderPath, "sitekey.txt");
+                        if (!string.IsNullOrEmpty(folderPath) && File.Exists(siteKeyPath))
+                        {
+                            try
+                            {
+                                var sk = File.ReadAllText(siteKeyPath).Trim();
+                                if (!string.IsNullOrEmpty(sk))
+                                {
+                                    var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                                    File.WriteAllText(tmpSk, sk);
+                                    try { logCallback?.Invoke($"[INFO] Wrote sitekey temp for installer: {tmpSk}"); } catch { }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+
                     process.Start();
                     ActiveProcesses.TryAdd(process.Id, process);
 
@@ -1147,6 +1042,17 @@ namespace AutoInstallerApp
                 {
                     try { ActiveProcesses.TryRemove(process.Id, out _); } catch { }
                     lock (ProcessLock) { if (CurrentProcess == process) CurrentProcess = null; }
+
+                    // Cleanup temp sitekey if present (best-effort)
+                    try
+                    {
+                        var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                        if (File.Exists(tmpSk))
+                        {
+                            try { File.Delete(tmpSk); } catch { }
+                        }
+                    }
+                    catch { }
                 }
             }
             catch (System.ComponentModel.Win32Exception ex)
@@ -1200,6 +1106,28 @@ namespace AutoInstallerApp
                         Process? elevatedProc = null;
                         try
                         {
+                            // If a sitekey.txt exists in the installer folder, publish it to a temp file for AHK
+                            try
+                            {
+                                string folderPathElev = Path.GetDirectoryName(localFilePath) ?? Path.GetDirectoryName(file) ?? string.Empty;
+                                string siteKeyPathElev = Path.Combine(folderPathElev, "sitekey.txt");
+                                if (!string.IsNullOrEmpty(folderPathElev) && File.Exists(siteKeyPathElev))
+                                {
+                                    try
+                                    {
+                                        var sk = File.ReadAllText(siteKeyPathElev).Trim();
+                                        if (!string.IsNullOrEmpty(sk))
+                                        {
+                                            var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                                            File.WriteAllText(tmpSk, sk);
+                                            try { logCallback?.Invoke($"[INFO] Wrote sitekey temp for elevated installer: {tmpSk}"); } catch { }
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+                            catch { }
+
                             elevatedProc = Process.Start(elevatedInfo);
                         }
                         catch (Exception startEx)
@@ -1243,6 +1171,17 @@ namespace AutoInstallerApp
                         {
                             try { RecordFailure(file, $"Elevated exit code {elevatedProc.ExitCode}"); } catch { }
                         }
+
+                        // Cleanup temp sitekey for elevated run (best-effort)
+                        try
+                        {
+                            var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                            if (File.Exists(tmpSk))
+                            {
+                                try { File.Delete(tmpSk); } catch { }
+                            }
+                        }
+                        catch { }
 
                         return elevatedProc.ExitCode == 0;
                     }

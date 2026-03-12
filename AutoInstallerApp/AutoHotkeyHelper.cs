@@ -11,6 +11,7 @@ SetTitleMatchMode, 2
 DetectHiddenWindows, On
 
 targetPID := __PID__
+siteKeyPath := ""__SITEKEY__""
 
 Loop
 {

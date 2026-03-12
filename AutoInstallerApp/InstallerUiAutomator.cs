@@ -101,8 +101,26 @@ namespace AutoInstallerApp
                 if (string.IsNullOrWhiteSpace(target)) return null;
                 return target;
             }
-
             catch { return null; }
+        }
+
+        // Safely check IsOffscreen property without throwing if property unsupported
+        private static bool IsWindowOffscreenSafe(Window win)
+        {
+            if (win == null) return false;
+            try
+            {
+                var prop = win.Properties.IsOffscreen;
+                if (prop == null) return false;
+                // Access Value inside try/catch because some providers may not support it
+                try
+                {
+                    var v = prop.Value;
+                    return v == true;
+                }
+                catch { return false; }
+            }
+            catch { return false; }
         }
 
         // Try to find a 'sitekey' file near the installer path. Search installer dir, parent dirs and any resolved .lnk targets.
@@ -680,14 +698,12 @@ namespace AutoInstallerApp
                                     {
                                         try
                                         {
-                                            // If window closed or offscreen, break
+                                            // If window closed or offscreen, break (safe check)
                                             try
                                             {
-                                                var isOffObj = capturedWin.Properties.IsOffscreen?.Value;
-                                                if (isOffObj == true)
-                                                    break;
+                                                if (IsWindowOffscreenSafe(capturedWin)) break;
                                             }
-                                            catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                                            catch { }
 
                                             // Process controls only within this window
                                             bool acted = false;
@@ -769,8 +785,8 @@ namespace AutoInstallerApp
                                                         {
                                                             try
                                                             {
-                                                                // Check if window closed/offscreen
-                                                                try { if (capturedWin.Properties.IsOffscreen?.Value == true) break; } catch { }
+                                                                // Check if window closed/offscreen (safe)
+                                                                try { if (IsWindowOffscreenSafe(capturedWin)) break; } catch { }
 
                                                                 // Re-check value
                                                                 string val2 = string.Empty;

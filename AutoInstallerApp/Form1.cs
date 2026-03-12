@@ -481,7 +481,54 @@ namespace AutoInstallerApp
                         catch (Exception ex) { Logger.WriteException(ex); }
                     };
 
-                    await InstallerService.InstallAllAsync(lowRisk, mediumRisk, highRisk, rdpFilesList, selected.Length, AddLog, progressCallback, cancelToken.Token);
+                    // First run low/medium/rdp in parallel (safe), but DO NOT run highRisk in parallel to avoid Windows Installer conflicts.
+                    await InstallerService.InstallAllAsync(lowRisk, mediumRisk, new List<string>(), rdpFilesList, selected.Length, AddLog, progressCallback, cancelToken.Token);
+
+                    // Now run high-risk installers sequentially (one-by-one) to avoid msiexec mutex conflicts
+                    if (highRisk.Count > 0)
+                    {
+                        AddLog("[INFO] Executing HighRisk installers sequentially...");
+                        foreach (var hf in highRisk)
+                        {
+                            if (cancelToken != null && cancelToken.IsCancellationRequested) break;
+
+                            try
+                            {
+                                AddLog($"[INFO] Starting sequential HighRisk: {Path.GetFileName(hf)}");
+                                bool ok = await InstallerService.InstallAsync(hf, AddLog, cancelToken?.Token ?? CancellationToken.None);
+
+                                if (ok)
+                                    AddLog($"[DONE] {Path.GetFileName(hf)}");
+                                else
+                                {
+                                    AddLog($"[ERROR] {Path.GetFileName(hf)}");
+                                    try { InstallerService.RecordFailure(hf, "HighRisk sequential install failed"); } catch { }
+                                }
+
+                                // Update progress using Completed count relative to total selected
+                                try
+                                {
+                                    int completed = InstallerService.Completed.Count;
+                                    int percent = (int)Math.Round(100.0 * completed / Math.Max(1, selected.Length));
+                                    try { progressCallback?.Invoke(percent); } catch { }
+                                }
+                                catch { }
+
+                                // Small pause to allow OS to settle and release installer mutexes
+                                try { await Task.Delay(2000, cancelToken?.Token ?? CancellationToken.None); } catch { }
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                AddLog("[STOP] HighRisk sequential installation cancelled.");
+                                break;
+                            }
+                            catch (Exception ex)
+                            {
+                                AddLog($"[ERROR] Exception during HighRisk installer {Path.GetFileName(hf)}: {ex.Message}");
+                                try { Logger.WriteException(ex, "HighRiskSequential"); } catch { }
+                            }
+                        }
+                    }
                     // Unsubscribe after run (no skip button in this UI version)
                 }
                 catch (OperationCanceledException)

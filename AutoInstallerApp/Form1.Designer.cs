@@ -48,9 +48,8 @@ namespace AutoInstallerApp
             chkInstallAll.AutoSize = true;
             chkInstallAll.Location = new Point(459, 143);
             chkInstallAll.Name = "chkInstallAll";
-            chkInstallAll.Size = new Size(74, 19);
+            chkInstallAll.Size = new Size(15, 14);
             chkInstallAll.TabIndex = 6;
-            chkInstallAll.Text = LanguageManager.Get("chkInstallAll");
             chkInstallAll.UseVisualStyleBackColor = true;
             // 
             // btnStart
@@ -59,7 +58,6 @@ namespace AutoInstallerApp
             btnStart.Name = "btnStart";
             btnStart.Size = new Size(430, 30);
             btnStart.TabIndex = 3;
-            btnStart.Text = LanguageManager.Get("btnStart");
             btnStart.UseVisualStyleBackColor = true;
             btnStart.Click += btnStart_Click;
             // 
@@ -74,7 +72,7 @@ namespace AutoInstallerApp
             // 
             progressBar.Location = new Point(12, 168);
             progressBar.Name = "progressBar";
-            progressBar.Size = new Size(567, 25);
+            progressBar.Size = new Size(518, 25);
             progressBar.TabIndex = 2;
             // 
             // btnOpenLog
@@ -83,7 +81,6 @@ namespace AutoInstallerApp
             btnOpenLog.Name = "btnOpenLog";
             btnOpenLog.Size = new Size(172, 30);
             btnOpenLog.TabIndex = 0;
-            btnOpenLog.Text = LanguageManager.Get("btnOpenLog");
             btnOpenLog.UseVisualStyleBackColor = true;
             btnOpenLog.Click += btnOpenLog_Click;
             // 
@@ -93,9 +90,8 @@ namespace AutoInstallerApp
             label1.Font = new Font("Segoe UI", 14.25F, FontStyle.Bold, GraphicsUnit.Point, 0);
             label1.Location = new Point(12, 67);
             label1.Name = "label1";
-            label1.Size = new Size(122, 25);
+            label1.Size = new Size(0, 25);
             label1.TabIndex = 6;
-            label1.Text = LanguageManager.Get("label1");
             // 
             // label2
             // 
@@ -113,7 +109,6 @@ namespace AutoInstallerApp
             btnStop.Name = "btnStop";
             btnStop.Size = new Size(430, 30);
             btnStop.TabIndex = 8;
-            btnStop.Text = LanguageManager.Get("btnStop");
             btnStop.UseVisualStyleBackColor = true;
             btnStop.Click += btnStop_Click;
             // 
@@ -150,7 +145,7 @@ namespace AutoInstallerApp
             progressBarlbl.BackColor = Color.Transparent;
             progressBarlbl.FlatStyle = FlatStyle.Flat;
             progressBarlbl.Font = new Font("Segoe UI", 9F, FontStyle.Bold, GraphicsUnit.Point, 0);
-            progressBarlbl.Location = new Point(254, 173);
+            progressBarlbl.Location = new Point(544, 173);
             progressBarlbl.Name = "progressBarlbl";
             progressBarlbl.Size = new Size(24, 15);
             progressBarlbl.TabIndex = 12;
@@ -175,7 +170,6 @@ namespace AutoInstallerApp
             Controls.Add(txtFolder);
             Icon = (Icon)resources.GetObject("$this.Icon");
             Name = "Form1";
-            Text = LanguageManager.Get("Form1_Title"); 
             ((System.ComponentModel.ISupportInitialize)pictureBox1).EndInit();
             ResumeLayout(false);
             PerformLayout();
