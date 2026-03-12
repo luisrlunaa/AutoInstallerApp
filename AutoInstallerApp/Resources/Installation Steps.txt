@@ -1,0 +1,7 @@
+1-Paste the Path
+2-Press button start Installation. If you want to install all the program in the folder, check Install All in other case you can select what you want to install.
+3-Enjoin.
+
+
+UNC U Drive Intaller Path:
+\\CORP.local\PROCO\IT Dept\#TEMP\#David\#Computer-Setup\CORPORATE USER

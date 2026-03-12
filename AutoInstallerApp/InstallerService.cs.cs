@@ -10,11 +10,8 @@ namespace AutoInstallerApp
         public static string? CurrentFile;
         // Current process being run for the CurrentFile (set inside RunInstaller)
         public static Process? CurrentProcess;
-        // Enable or disable the UI automation helper (can be toggled from the UI)
-        public static bool EnableUiAutomation = true;
         // Named pipe used for agent communication
         private const string AgentPipeName = "AutoInstallerAgentPipe";
-
         // Silent args mapping (loaded from silentArgs.json in application folder)
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> SilentArgs = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static bool SilentArgsLoaded = false;
@@ -50,6 +47,26 @@ namespace AutoInstallerApp
                 try { Logger.WriteException(ex, "LoadSilentArgs"); } catch { }
             }
             finally { SilentArgsLoaded = true; }
+        }
+
+        // Remove Mark of the Web to avoid Open File Security Warning popups for copied files
+        private static void UnblockFile(string fileName)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(fileName) || !File.Exists(fileName)) return;
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell",
+                    Arguments = $"-NoProfile -NonInteractive -Command \"Unblock-File -Path '{fileName}'\"",
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                var p = Process.Start(psi);
+                p?.WaitForExit(5000);
+            }
+            catch { }
         }
 
         private static string? GetSilentArgsForExecutable(string exeName)
@@ -963,58 +980,26 @@ namespace AutoInstallerApp
                 // ============================
                 if (exeName.Contains("office"))
                 {
-                    logCallback("[INFO] Office installer detected → running from original location without parameters");
+                    logCallback?.Invoke("[INFO] Office detected. Launching and returning immediately (fire-and-forget).");
 
-                    Process office = new Process();
-                    office.StartInfo.FileName = file;
-                    office.StartInfo.Arguments = ""; // Office NO acepta /silent
-                    office.StartInfo.UseShellExecute = true;
-                    office.StartInfo.CreateNoWindow = false;
+                    Process officeProc = new Process();
+                    officeProc.StartInfo.FileName = file;
+                    officeProc.StartInfo.UseShellExecute = true;
+                    if (elevated) officeProc.StartInfo.Verb = "runas";
 
-                    if (elevated)
-                        office.StartInfo.Verb = "runas";
-
-                    CancellationTokenSource? automatorCtsOffice = null;
                     try
                     {
-                        lock (ProcessLock) { CurrentProcess = office; }
-                        office.Start();
-                        ActiveProcesses.TryAdd(office.Id, office);
-
-                        try
-                        {
-                                automatorCtsOffice = CancellationTokenSource.CreateLinkedTokenSource(token);
-                                string? pnameOffice = null;
-                                try { pnameOffice = Path.GetFileNameWithoutExtension(file); } catch { }
-                                InstallerUiAutomator.InteractWithProcess(office.Id, logCallback, automatorCtsOffice.Token, processNameHint: pnameOffice);
-                        }
-                        catch { }
-
-                        while (!office.HasExited)
-                        {
-                            if (token.IsCancellationRequested)
-                            {
-                                try { office.Kill(); } catch { }
-                                try { automatorCtsOffice?.Cancel(); } catch { }
-                                return false;
-                            }
-
-                            Thread.Sleep(200);
-                        }
-
-                        try { automatorCtsOffice?.Cancel(); } catch { }
-
-                        if (office.ExitCode != 0)
-                        {
-                            RecordFailure(file, $"Exit code {office.ExitCode}");
-                        }
-
-                        return office.ExitCode == 0;
+                        officeProc.Start();
+                        // Fire-and-forget: start automator briefly to press initial Run/Install then return success
+                        _ = Task.Run(() => InstallerUiAutomator.InteractWithProcess(officeProc.Id, logCallback, CancellationToken.None, processNameHint: "office"));
+                        Thread.Sleep(10000); // give automator time to press initial button
+                        logCallback?.Invoke("[OK] Office launched in background. Continuing with list.");
+                        return true;
                     }
-                    finally
+                    catch (Exception ex)
                     {
-                        try { ActiveProcesses.TryRemove(office.Id, out _); } catch { }
-                        lock (ProcessLock) { if (CurrentProcess == office) CurrentProcess = null; }
+                        try { Logger.WriteException(ex, "RunInstaller:OfficeLaunch"); } catch { }
+                        return false;
                     }
                 }
 
@@ -1037,6 +1022,7 @@ namespace AutoInstallerApp
                     try
                     {
                         File.Copy(file, localFile, true);
+                        try { UnblockFile(localFile); } catch { }
                         logCallback?.Invoke($"[INFO] Copied to local temp: {localFile}");
                     }
                     catch (Exception ex)
@@ -1126,13 +1112,13 @@ namespace AutoInstallerApp
 
                     try
                     {
-                            automatorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                            // If this process was started elevated and our process is not elevated, launching a helper
-                            // may be necessary. We still start background automator here; the separate helper exists
-                            // for scenarios where the app can spawn an elevated agent.
-                            string? pname = null;
-                            try { pname = Path.GetFileNameWithoutExtension(localFile); } catch { }
-                            InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token, processNameHint: pname);
+                        automatorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        // If this process was started elevated and our process is not elevated, launching a helper
+                        // may be necessary. We still start background automator here; the separate helper exists
+                        // for scenarios where the app can spawn an elevated agent.
+                        string? pname = null;
+                        try { pname = Path.GetFileNameWithoutExtension(localFile); } catch { }
+                        InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token, processNameHint: pname);
                     }
                     catch { }
 

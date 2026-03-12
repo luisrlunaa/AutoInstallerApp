@@ -4,6 +4,7 @@ using FlaUI.UIA3;
 using System.Diagnostics;
 using System.Management;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace AutoInstallerApp
 {
@@ -231,6 +232,229 @@ namespace AutoInstallerApp
                 return false;
             }
             catch { return false; }
+        }
+
+        // Save a reduced UIA snapshot (ControlType, Name, AutomationId, BoundingRect) to disk for debugging and tuning
+        private static void SaveUIASnapshot(Window window, string reason)
+        {
+            try
+            {
+                var root = AppContext.BaseDirectory ?? Directory.GetCurrentDirectory();
+                var outDir = Path.Combine(root, "uia_snapshots");
+                Directory.CreateDirectory(outDir);
+
+                var now = DateTime.UtcNow;
+                var fileName = $"uia_{now:yyyyMMdd_HHmmss}_{reason}.json";
+                var outPath = Path.Combine(outDir, fileName);
+
+                var snapshot = new List<object>();
+                var all = window.FindAllDescendants();
+                foreach (var el in all)
+                {
+                    try
+                    {
+                        var rect = el.Properties.BoundingRectangle?.Value;
+                        snapshot.Add(new
+                        {
+                            ControlType = el.ControlType.ToString(),
+                            Name = el.Name,
+                            AutomationId = el.Properties.AutomationId?.Value,
+                            Bounding = rect == null ? null : new { rect.Value.X, rect.Value.Y, rect.Value.Width, rect.Value.Height }
+                        });
+                    }
+                    catch { }
+                }
+
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                File.WriteAllText(outPath, JsonSerializer.Serialize(snapshot, options));
+            }
+            catch { }
+        }
+
+        // Special-case handling for Sophos installers which often use custom dialogs
+        private static bool TryHandleSophos(Window win, Action<string>? log)
+        {
+            try
+            {
+                var title = win.AsWindow()?.Title ?? string.Empty;
+                var curFile = InstallerService.CurrentFile ?? string.Empty;
+                if (!(title.IndexOf("sophos", StringComparison.OrdinalIgnoreCase) >= 0 || curFile.IndexOf("sophos", StringComparison.OrdinalIgnoreCase) >= 0))
+                    return false;
+
+                log?.Invoke($"[AUTOMATOR-SOPHOS] Handling window '{title}'");
+
+                // Toggle any agreement checkboxes first
+                try
+                {
+                    var cbs = win.FindAllDescendants(cf => cf.ByControlType(ControlType.CheckBox));
+                    foreach (var cb in cbs)
+                    {
+                        try
+                        {
+                            var name = cb.Name ?? string.Empty;
+                            if (string.IsNullOrWhiteSpace(name)) continue;
+                            if (AcceptCheckboxTexts.Any(t => name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) || name.IndexOf("agree", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                var box = cb.AsCheckBox();
+                                if (box != null && (box.IsChecked == false || box.IsChecked == null))
+                                {
+                                    box.Toggle();
+                                    log?.Invoke("[AUTOMATOR-SOPHOS] Checked agreement checkbox");
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+
+                // Find actionable buttons (prefer explicit Continue/Install)
+                var buttons = win.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
+                foreach (var b in buttons)
+                {
+                    try
+                    {
+                        var name = (b.Name ?? string.Empty).Trim();
+                        if (string.IsNullOrWhiteSpace(name)) continue;
+                        if (System.Text.RegularExpressions.Regex.IsMatch(name, "(continue|install|allow|accept|run|ok|next)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        {
+                            try
+                            {
+                                var btn = b.AsButton();
+                                if (btn != null && btn.IsEnabled)
+                                {
+                                    btn.Invoke();
+                                    log?.Invoke($"[AUTOMATOR-SOPHOS] Invoked button '{name}'");
+                                    return true;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                }
+
+                // Fallback: send Enter to the window
+                try
+                {
+                    SendEnterToWindow(win);
+                    log?.Invoke("[AUTOMATOR-SOPHOS] Sent Enter fallback");
+                    return true;
+                }
+                catch { }
+            }
+            catch (Exception ex) { try { Logger.WriteException(ex, "TryHandleSophos"); } catch { } }
+
+            return false;
+        }
+
+        // Try to detect WebView/CEF/Edge-hosted bootstrapper UI and attempt keyboard-based automation
+        private static bool TryAutomateWebBootstrapper(Window window, Action<string>? log)
+        {
+            try
+            {
+                var all = window.FindAllDescendants();
+                foreach (var el in all)
+                {
+                    try
+                    {
+                        var name = (el.Name ?? string.Empty).ToLowerInvariant();
+                        var ctrl = el.ControlType;
+
+                        // Heuristics: control name contains web-related token or control is a Pane (many WebView hosts expose a Pane)
+                        if (name.Contains("web") || name.Contains("edge") || name.Contains("chromium") || name.Contains("browser") || name.Contains("cef") || (ctrl != null && ctrl.Equals(ControlType.Pane)))
+                        {
+                            log?.Invoke($"[AUTOMATOR-WEB] Possible web control detected: {el.ControlType}:{el.Name}");
+                            try { SaveUIASnapshot(window, "web_detected"); } catch { }
+                            try { window.AsWindow()?.Focus(); } catch { }
+                            try { el.Focus(); } catch { }
+
+                            // Strategy: SPACE (accept) then small delay then ENTER. Many web UIs map default action to Enter.
+                            try
+                            {
+                                FlaUI.Core.Input.Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.SPACE);
+                                Thread.Sleep(150);
+                                FlaUI.Core.Input.Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN);
+                                log?.Invoke("[AUTOMATOR-WEB] Sent Space + Enter");
+                            }
+                            catch { }
+
+                            // Try to find exposed UIA buttons inside the web control and invoke the most likely ones
+                            bool invoked = false;
+                            try
+                            {
+                                var innerButtons = el.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
+                                foreach (var ib in innerButtons)
+                                {
+                                    try
+                                    {
+                                        var iname = ib.Name ?? string.Empty;
+                                        if (string.IsNullOrWhiteSpace(iname)) continue;
+                                        if (System.Text.RegularExpressions.Regex.IsMatch(iname, "(next|install|accept|agree|continue|done|finish|close|ok)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                                        {
+                                            try { ib.AsButton()?.Invoke(); log?.Invoke($"[AUTOMATOR-WEB] Invoked inner button: {iname}"); invoked = true; break; } catch { }
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+                            catch { }
+
+                            if (invoked) return true;
+
+                            // If no UIA buttons found, attempt keyboard navigation (Tab..Enter)
+                            try
+                            {
+                                for (int i = 0; i < 8; i++)
+                                {
+                                    try { FlaUI.Core.Input.Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.TAB); } catch { }
+                                    Thread.Sleep(120);
+                                }
+                                try { FlaUI.Core.Input.Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN); log?.Invoke("[AUTOMATOR-WEB] Sent Tab x8 + Enter"); } catch { }
+                            }
+                            catch { }
+
+                            // Final fallback: click the bottom-right quadrant of the window (common place for Next/Install buttons)
+                            try
+                            {
+                                var rect = window.Properties.BoundingRectangle?.Value;
+                                if (rect != null)
+                                {
+                                    double left = rect.Value.X;
+                                    double top = rect.Value.Y;
+                                    double width = rect.Value.Width;
+                                    double height = rect.Value.Height;
+                                    int cx = (int)Math.Round(left + width * 0.85);
+                                    int cy = (int)Math.Round(top + height * 0.88);
+                                    try
+                                    {
+                                        SetForegroundWindow(new IntPtr(Convert.ToInt32(window.Properties.NativeWindowHandle.Value)));
+                                    }
+                                    catch { }
+                                    try
+                                    {
+                                        SetCursorPos(cx, cy);
+                                        Thread.Sleep(80);
+                                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                                        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                                        log?.Invoke($"[AUTOMATOR-WEB] Clicked bottom-right fallback at ({cx},{cy})");
+                                        try { SaveUIASnapshot(window, "web_clicked_bottomright"); } catch { }
+                                        return true;
+                                    }
+                                    catch (Exception ex) { try { Logger.WriteException(ex, "AutomatorWeb:click_fallback"); } catch { } }
+                                }
+                            }
+                            catch { }
+
+                            return false;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { try { Logger.WriteException(ex, "TryAutomateWebBootstrapper"); } catch { } }
+
+            return false;
         }
 
         public static void InteractWithProcess(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs = 120000, string? processNameHint = null)
@@ -467,6 +691,16 @@ namespace AutoInstallerApp
 
                                             // Process controls only within this window
                                             bool acted = false;
+
+                                            // Special-case: try to detect web-based bootstrapper (WiX Burn / web UI) and act on HTML buttons
+                                            try
+                                            {
+                                                if (TryAutomateWebBootstrapper(capturedWin, logCallback))
+                                                {
+                                                    acted = true;
+                                                }
+                                            }
+                                            catch { }
 
                                             // 0) Detect required input fields (password/license). If present and empty, pause this watcher
                                             try
