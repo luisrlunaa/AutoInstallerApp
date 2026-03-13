@@ -848,11 +848,11 @@ namespace AutoInstallerApp
 
                                                 // Check buttons
                                                 // First, special-case Sophos dialogs
-                                                try
-                                                {
-                                                    try { if (TryHandleSophos(capturedWin, logCallback)) { acted = true; } } catch { }
-                                                }
-                                                catch { }
+                                                //try
+                                                //{
+                                                //    try { if (TryHandleSophos(capturedWin, logCallback)) { acted = true; } } catch { }
+                                                //}
+                                                //catch { }
 
                                                 var btns = capturedWin.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
                                                 foreach (var b in btns)

@@ -50,21 +50,18 @@ namespace AutoInstallerApp
         }
 
         // Remove Mark of the Web to avoid Open File Security Warning popups for copied files
-        private static void UnblockFile(string fileName)
+        private static void UnblockFile(string path)
         {
             try
             {
-                if (string.IsNullOrEmpty(fileName) || !File.Exists(fileName)) return;
                 var psi = new ProcessStartInfo
                 {
                     FileName = "powershell",
-                    Arguments = $"-NoProfile -NonInteractive -Command \"Unblock-File -Path '{fileName}'\"",
-                    WindowStyle = ProcessWindowStyle.Hidden,
+                    Arguments = $"-Command \"Unblock-File -Path '{path}'\"",
                     CreateNoWindow = true,
-                    UseShellExecute = false
+                    WindowStyle = ProcessWindowStyle.Hidden
                 };
-                var p = Process.Start(psi);
-                p?.WaitForExit(5000);
+                Process.Start(psi)?.WaitForExit();
             }
             catch { }
         }
@@ -864,7 +861,7 @@ namespace AutoInstallerApp
                         officeProc.Start();
                         // Fire-and-forget: start automator briefly to press initial Run/Install then return success
                         _ = Task.Run(() => InstallerUiAutomator.InteractWithProcess(officeProc.Id, logCallback, CancellationToken.None, processNameHint: "office"));
-                        Thread.Sleep(10000); // give automator time to press initial button
+                        Thread.Sleep(5000); // give automator time to press initial button
                         logCallback?.Invoke("[OK] Office launched in background. Continuing with list.");
                         return true;
                     }
@@ -872,6 +869,23 @@ namespace AutoInstallerApp
                     {
                         try { Logger.WriteException(ex, "RunInstaller:OfficeLaunch"); } catch { }
                         return false;
+                    }
+                }
+
+                // ============================
+                // CASO ESPECIAL: spiceworks
+                // ============================
+                if (exeName.Contains("spiceworks"))
+                {
+                    string folder = Path.GetDirectoryName(file) ?? "";
+                    string skPath = Path.Combine(folder, "sitekey.txt");
+                    if (File.Exists(skPath))
+                    {
+                        string key = File.ReadAllText(skPath).Trim();
+                        // Ponemos la clave en el portapapeles para que AHK la pegue si es necesario
+                        Thread t = new Thread(() => System.Windows.Forms.Clipboard.SetText(key));
+                        t.SetApartmentState(ApartmentState.STA);
+                        t.Start();
                     }
                 }
 
@@ -905,6 +919,7 @@ namespace AutoInstallerApp
                     }
                 }
 
+                UnblockFile(localFile);
                 Process process = new Process();
 
                 if (localFile.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))

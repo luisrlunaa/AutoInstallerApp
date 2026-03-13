@@ -1,78 +1,77 @@
 ﻿namespace AutoInstallerApp
 {
+    using System.IO;
+
     public static class AutoHotkeyHelper
     {
         public static string CreateAutoHotkeyScript(int pid)
         {
-            string ahkPath = Path.Combine(Path.GetTempPath(), "auto_installer_dynamic.ahk");
-
-            string template = @"#NoTrayIcon
+            // Eliminamos la búsqueda de nombres de botones y usamos fuerza bruta de teclado
+            string script = $@"
+#NoTrayIcon
 SetTitleMatchMode, 2
 DetectHiddenWindows, On
+SetKeyDelay, 50, 50
 
-targetPID := __PID__
-siteKeyPath := ""__SITEKEY__""
+targetPID := {pid}
 
 Loop
-{
-    ; 1. SECURITY ALERTS (SmartScreen / Open File Warning)
-    if WinExist(""ahk_class #32770"") or WinExist(""Windows protected your PC"") or WinExist(""Security Warning"")
-    {
+{{
+    ; 1. ALERTAS DE SEGURIDAD (SmartScreen / Botón RUN)
+    if WinExist(""ahk_class #32770"") or WinExist(""Security Warning"") or WinExist(""Windows protected"")
+    {{
         WinActivate
         Sleep, 200
-        ControlClick, More info, A,,,, NA
-        Sleep, 200
-        Send, {Alt Down}r{Alt Up}
-        Send, {Enter}
-    }
+        Send, {{Space}} ; Selecciona el botón por defecto
+        Sleep, 100
+        Send, {{Enter}}
+    }}
 
-    ; 1.b TIGHTVNC PASSWORD DIALOG - rellenar Edit1..Edit4 y pulsar OK
-    if WinExist(""TightVNC Server Setup"") or WinExist(""TightVNC"")
-    {
+    ; 2. TIGHTVNC (Relleno de 4 campos con TAB)
+    if WinExist(""TightVNC"")
+    {{
         WinActivate
-        Sleep, 200
-        ; Edit1/Edit2 -> main password, Edit3/Edit4 -> view-only password (titles may vary by installer version)
-        ControlSetText, Edit1, aica, A
-        ControlSetText, Edit2, aica, A
-        ControlSetText, Edit3, aica, A
-        ControlSetText, Edit4, aica, A
-        Sleep, 150
-        ControlClick, Button1, A
-    }
+        Loop, 4
+        {{
+            SendRaw, aica
+            Sleep, 100
+            Send, {{Tab}}
+        }}
+        Sleep, 100
+        Send, {{Enter}}
+    }}
 
-    ; 2. Installer windows for target PID
+    ; 3. SOPHOS Y OTROS (Fuerza bruta para Web-UI)
     WinGet, id, List,,, Program Manager
     Loop, %id%
-    {
+    {{
         this_id := id%A_Index%
         WinGet, thisPID, PID, ahk_id %this_id%
-
         if (thisPID = targetPID)
-        {
+        {{
             WinActivate, ahk_id %this_id%
-            Sleep, 300
+            
+            ; Sophos: Enter y Espacio son universales para botones web enfocados
+            Send, {{Space}}
+            Sleep, 200
+            Send, {{Enter}}
+            
+            ; Clic de respaldo en esquina inferior derecha (donde suelen estar los botones)
+            WinGetPos, , , w, h, ahk_id %this_id%
+            if (w > 0) {{
+                Click, % (w - 100), % (h - 60)
+            }}
+        }}
+    }}
 
-            buttons := [""Next"", ""Siguiente"", ""Install"", ""Instalar"", ""Finish"", ""Aceptar"", ""OK"", ""Continuar"", ""Yes"", ""Close""]
+; Si el proceso ya no tiene ventanas, salir del script
+    if !WinExist(""ahk_pid "" . targetPID)
+        ExitApp
 
-            for index, label in buttons
-            {
-                ControlClick, %label%, ahk_id %this_id%
-                Sleep, 200
-            }
-
-            ControlGetPos, x, y, w, h, , ahk_id %this_id%
-            if (w > 0 and h > 0)
-            {
-                Click, % (x + w - 80) % , % (y + h - 40)
-            }
-        }
-    }
-
-    Sleep, 500
-}
+    Sleep, 1000
+}}
 ";
-
-            var script = template.Replace("__PID__", pid.ToString());
+            string ahkPath = Path.Combine(Path.GetTempPath(), "auto_installer_dynamic.ahk");
             File.WriteAllText(ahkPath, script);
             return ahkPath;
         }

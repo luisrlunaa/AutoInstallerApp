@@ -13,6 +13,7 @@ namespace AutoInstallerApp
             try
             {
                 InitializeComponent();
+                this.MinimumSize = new Size(608, 539);
                 // Initialize language resources and apply localized texts to controls (if resources available)
                 try { LanguageManager.ApplyToForm(this); } catch (Exception ex) { Logger.WriteException(ex); }
 
