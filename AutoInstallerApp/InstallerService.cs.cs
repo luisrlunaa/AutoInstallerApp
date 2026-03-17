@@ -1,6 +1,7 @@
 ﻿using Microsoft.Win32;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Xml.Linq;
 
 namespace AutoInstallerApp
 {
@@ -704,6 +705,7 @@ namespace AutoInstallerApp
                     return false;
 
                 string name = Path.GetFileName(file);
+                string exeName = name.ToLower(); // Define exeName for the AHK script parameter
                 logCallback($"[INSTALLING] {name}");
 
                 try
@@ -711,12 +713,13 @@ namespace AutoInstallerApp
                     // Do not wait here to avoid serializing installers. Conflict detection is handled by the caller
                     if (token.IsCancellationRequested)
                         return false;
+
                     bool success = RunInstaller(file, logCallback, elevated: false, token);
 
                     // === FALLBACK AHK ===
                     if (!success && !token.IsCancellationRequested)
                     {
-                        logCallback($"[INFO] FlaUI no logró automatizar {name}. Probando AutoHotkey...");
+                        logCallback($"[INFO] FlaUI failed to automate {name}. Trying AutoHotkey...");
 
                         try
                         {
@@ -733,7 +736,8 @@ namespace AutoInstallerApp
                             }
                             else
                             {
-                                string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id);
+                                // PASS BOTH PARAMETERS HERE
+                                string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id, exeName);
                                 Process ahk = Process.Start(ahkExe, $"\"{ahkScript}\"");
 
                                 while (!CurrentProcess.HasExited)
@@ -832,17 +836,19 @@ namespace AutoInstallerApp
         {
             try
             {
-                string exeName = Path.GetFileName(file).ToLower();
+                // 1. Resolve shortcut immediately so 'file' and 'exeName' refer to the actual target
+                string actualFile = ResolveShortcut(file);
+                string exeName = Path.GetFileName(actualFile).ToLower();
 
                 // Instaladores que NO aceptan parámetros silenciosos
                 string[] nonSilentInstallers =
                 {
-                    "chrome", "firefox", "edge", "anydesk",
-                    "teamviewer", "zoom", "acro", "reader",
-                    "java", "jre", "winrar",
-                    // Sophos installer does not accept generic /silent switches
-                    "sophos", "sophosinstall", "sophossetup"
-                };
+            "chrome", "firefox", "edge", "anydesk",
+            "teamviewer", "zoom", "acro", "reader",
+            "java", "jre", "winrar",
+            // Sophos installer does not accept generic /silent switches
+            "sophos", "sophosinstall", "sophossetup"
+        };
 
                 // ============================
                 // CASO ESPECIAL: OFFICE
@@ -852,7 +858,7 @@ namespace AutoInstallerApp
                     logCallback?.Invoke("[INFO] Office detected. Launching and returning immediately (fire-and-forget).");
 
                     Process officeProc = new Process();
-                    officeProc.StartInfo.FileName = file;
+                    officeProc.StartInfo.FileName = actualFile; // Using actualFile
                     officeProc.StartInfo.UseShellExecute = true;
                     if (elevated) officeProc.StartInfo.Verb = "runas";
 
@@ -877,7 +883,7 @@ namespace AutoInstallerApp
                 // ============================
                 if (exeName.Contains("spiceworks"))
                 {
-                    string folder = Path.GetDirectoryName(file) ?? "";
+                    string folder = Path.GetDirectoryName(actualFile) ?? ""; // Using actualFile
                     string skPath = Path.Combine(folder, "sitekey.txt");
                     if (File.Exists(skPath))
                     {
@@ -893,8 +899,8 @@ namespace AutoInstallerApp
                 // OTROS INSTALADORES
                 // ============================
                 string localFile;
-                // Use pre-copied local copy if available
-                if (LocalCopies.TryGetValue(file, out var mapped) && File.Exists(mapped))
+                // Use pre-copied local copy if available - we use 'actualFile' as the key
+                if (LocalCopies.TryGetValue(actualFile, out var mapped) && File.Exists(mapped))
                 {
                     localFile = mapped;
                     logCallback?.Invoke($"[INFO] Using pre-copied local temp: {localFile}");
@@ -904,10 +910,10 @@ namespace AutoInstallerApp
                     string tempFolder = Path.Combine(Path.GetTempPath(), "AutoInstaller");
                     Directory.CreateDirectory(tempFolder);
 
-                    localFile = Path.Combine(tempFolder, Path.GetFileName(file));
+                    localFile = Path.Combine(tempFolder, Path.GetFileName(actualFile));
                     try
                     {
-                        File.Copy(file, localFile, true);
+                        File.Copy(actualFile, localFile, true);
                         try { UnblockFile(localFile); } catch { }
                         logCallback?.Invoke($"[INFO] Copied to local temp: {localFile}");
                     }
@@ -915,7 +921,7 @@ namespace AutoInstallerApp
                     {
                         // Fallback to original file if copy fails
                         logCallback?.Invoke($"[WARN] Failed to copy to temp, using original: {ex.Message}");
-                        localFile = file;
+                        localFile = actualFile;
                     }
                 }
 
@@ -940,7 +946,7 @@ namespace AutoInstallerApp
                     }
                     else
                     {
-                        // Try to sniff common installer engines by reading the start of the file
+                        // Sniff common installer engines
                         string exeContent = string.Empty;
                         try
                         {
@@ -961,18 +967,16 @@ namespace AutoInstallerApp
                         }
                         else if (!string.IsNullOrEmpty(exeContent) && (exeContent.IndexOf("Nullsoft", StringComparison.OrdinalIgnoreCase) >= 0 || exeContent.IndexOf("NSIS", StringComparison.OrdinalIgnoreCase) >= 0))
                         {
-                            process.StartInfo.Arguments = "/S"; // NSIS silent
+                            process.StartInfo.Arguments = "/S";
                             logCallback?.Invoke("[INFO] NSIS/Nullsoft detected, using /S");
                         }
                         else if (!string.IsNullOrEmpty(exeContent) && exeContent.IndexOf("InstallShield", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
-                            // InstallShield installers often support /s or msiexec-based silent; try /s as conservative option
                             process.StartInfo.Arguments = "/s";
-                            logCallback?.Invoke("[INFO] InstallShield detected, using /s (may require MSI wrapper)");
+                            logCallback?.Invoke("[INFO] InstallShield detected, using /s");
                         }
                         else
                         {
-                            // Generic fallback: common silent switches (some installers will ignore unknown params)
                             process.StartInfo.Arguments = "/silent";
                             logCallback?.Invoke("[INFO] Using generic /silent argument as fallback");
                         }
@@ -998,21 +1002,16 @@ namespace AutoInstallerApp
                     // If a sitekey.txt exists in the installer folder, publish it to a temp file
                     try
                     {
-                        string folderPath = Path.GetDirectoryName(localFile) ?? Path.GetDirectoryName(file) ?? string.Empty;
+                        string folderPath = Path.GetDirectoryName(localFile) ?? Path.GetDirectoryName(actualFile) ?? string.Empty;
                         string siteKeyPath = Path.Combine(folderPath, "sitekey.txt");
                         if (!string.IsNullOrEmpty(folderPath) && File.Exists(siteKeyPath))
                         {
-                            try
+                            var sk = File.ReadAllText(siteKeyPath).Trim();
+                            if (!string.IsNullOrEmpty(sk))
                             {
-                                var sk = File.ReadAllText(siteKeyPath).Trim();
-                                if (!string.IsNullOrEmpty(sk))
-                                {
-                                    var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
-                                    File.WriteAllText(tmpSk, sk);
-                                    try { logCallback?.Invoke($"[INFO] Wrote sitekey temp for installer: {tmpSk}"); } catch { }
-                                }
+                                var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                                File.WriteAllText(tmpSk, sk);
                             }
-                            catch { }
                         }
                     }
                     catch { }
@@ -1023,11 +1022,19 @@ namespace AutoInstallerApp
                     try
                     {
                         automatorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                        // If this process was started elevated and our process is not elevated, launching a helper
-                        // may be necessary. We still start background automator here; the separate helper exists
-                        // for scenarios where the app can spawn an elevated agent.
                         string? pname = null;
-                        try { pname = Path.GetFileNameWithoutExtension(localFile); } catch { }
+                        try
+                        {
+                            pname = Path.GetFileNameWithoutExtension(localFile).ToLower();
+                        }
+                        catch { }
+
+                        // FORCE HINT for TightVNC
+                        if (pname.Contains("tightvnc"))
+                        {
+                            pname = "TightVNC";
+                        }
+
                         InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token, processNameHint: pname);
                     }
                     catch { }
@@ -1040,7 +1047,6 @@ namespace AutoInstallerApp
                             try { automatorCts?.Cancel(); } catch { }
                             return false;
                         }
-
                         Thread.Sleep(200);
                     }
 
@@ -1048,7 +1054,7 @@ namespace AutoInstallerApp
 
                     if (process.ExitCode != 0)
                     {
-                        RecordFailure(file, $"Exit code {process.ExitCode}");
+                        RecordFailure(actualFile, $"Exit code {process.ExitCode}");
                     }
 
                     return process.ExitCode == 0;
@@ -1057,15 +1063,10 @@ namespace AutoInstallerApp
                 {
                     try { ActiveProcesses.TryRemove(process.Id, out _); } catch { }
                     lock (ProcessLock) { if (CurrentProcess == process) CurrentProcess = null; }
-
-                    // Cleanup temp sitekey if present (best-effort)
                     try
                     {
                         var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
-                        if (File.Exists(tmpSk))
-                        {
-                            try { File.Delete(tmpSk); } catch { }
-                        }
+                        if (File.Exists(tmpSk)) File.Delete(tmpSk);
                     }
                     catch { }
                 }
@@ -1208,6 +1209,27 @@ namespace AutoInstallerApp
                 }
 
                 throw;
+            }
+        }
+        private static string ResolveShortcut(string filePath)
+        {
+            if (!filePath.EndsWith(".lnk", System.StringComparison.OrdinalIgnoreCase))
+                return filePath;
+
+            try
+            {
+                // Requires a reference to COM "Windows Script Host Object Model"
+                // Or use 'dynamic' to avoid adding the reference manually
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                dynamic shell = Activator.CreateInstance(shellType);
+                var shortcut = shell.CreateShortcut(filePath);
+                return shortcut.TargetPath;
+            }
+            catch (Exception ex)
+            {
+                // If resolution fails, return the original path so the app can at least try to use it
+                Debug.WriteLine("Shortcut resolution failed: " + ex.Message);
+                return filePath;
             }
         }
     }
