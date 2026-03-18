@@ -7,6 +7,12 @@ namespace AutoInstallerApp
     {
         private CancellationTokenSource? cancelToken;
         private bool initializationFailed = false;
+        private System.Windows.Forms.Timer uiTimer;
+        private DateTime? startTime;
+
+        // **Total number of installers used for progress calculations**
+        // Set once when the user starts the run and used to compute percent.
+        private int totalInstallers = 1;
 
         public Form1()
         {
@@ -50,10 +56,14 @@ namespace AutoInstallerApp
             uiTimer = new System.Windows.Forms.Timer();
             uiTimer.Interval = 1000; // 1 second
             uiTimer.Tick += UiTimer_Tick;
-        }
 
-        private System.Windows.Forms.Timer uiTimer;
-        private DateTime? startTime;
+            // Make progress bar smooth where possible
+            try
+            {
+                progressBar.Style = ProgressBarStyle.Continuous;
+            }
+            catch { }
+        }
 
         // Resolve a .lnk shortcut to its target (file or folder) using WScript.Shell
         private static string? ResolveShortcutTarget(string lnkPath)
@@ -365,8 +375,20 @@ namespace AutoInstallerApp
 
                 cancelToken = new CancellationTokenSource();
 
-                // Reset ProgressBar
-                progressBar.Maximum = 100;
+                // Reset ProgressBar: use installer count as Maximum for accurate progress
+                totalInstallers = Math.Max(1, selected.Length);
+                try
+                {
+                    progressBar.Maximum = totalInstallers;
+                    progressBar.Value = 0;
+                }
+                catch
+                {
+                    // If the control doesn't accept a small maximum, fall back to 100-based percent
+                    progressBar.Maximum = 100;
+                    progressBar.Value = 0;
+                }
+
                 UpdateProgress(0);
 
                 AddLog("Classifying installers...");
@@ -406,10 +428,37 @@ namespace AutoInstallerApp
                 try { InstallerService.PrepareLocalCopies(selected, AddLog); }
                 catch (Exception ex) { Logger.Write("[WARN] PrepareLocalCopies failed: " + ex.Message); }
 
-                // Standardized progress reporting using UpdateProgress method
-                Action<int> progressCallback = (currentPercent) =>
+                // Progress callback: update based on InstallerService.Completed count
+                Action<int> progressCallback = (_) =>
                 {
-                    UpdateProgress(currentPercent);
+                    try
+                    {
+                        int completedCount = InstallerService.Completed.Count;
+                        // If progressBar.Maximum equals totalInstallers, set Value directly
+                        try
+                        {
+                            if (progressBar.Maximum == totalInstallers)
+                            {
+                                int value = Math.Min(progressBar.Maximum, Math.Max(0, completedCount));
+                                // Ensure UI thread update
+                                UpdateProgressBarValue(value, totalInstallers);
+                            }
+                            else
+                            {
+                                // Fallback: compute percent and set label
+                                int percent = (int)Math.Round(100.0 * completedCount / totalInstallers);
+                                UpdateProgress(percent);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.WriteException(ex, "progressCallback:update");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.WriteException(ex, "progressCallback");
+                    }
                 };
 
                 try
@@ -431,10 +480,13 @@ namespace AutoInstallerApp
                             if (ok) AddLog($"[DONE] {Path.GetFileName(hf)}");
                             else AddLog($"[ERROR] {Path.GetFileName(hf)}");
 
-                            // Update progress manually based on completed count
-                            int completed = InstallerService.Completed.Count;
-                            int percent = (int)Math.Round(100.0 * completed / Math.Max(1, selected.Length));
-                            UpdateProgress(percent);
+                            // Update progress based on InstallerService.Completed
+                            try
+                            {
+                                int completedCount = InstallerService.Completed.Count;
+                                UpdateProgressBarValue(Math.Min(completedCount, progressBar.Maximum), totalInstallers);
+                            }
+                            catch (Exception ex) { Logger.WriteException(ex, "HighRiskProgressUpdate"); }
 
                             await Task.Delay(2000, cancelToken.Token);
                         }
@@ -445,7 +497,24 @@ namespace AutoInstallerApp
                     AddLog("[STOP] Installation cancelled by user.");
                 }
 
-                UpdateProgress(100); // Ensure it finishes at 100%
+                // Final ensure 100% if all completed
+                try
+                {
+                    int finalCompleted = InstallerService.Completed.Count;
+                    if (finalCompleted >= totalInstallers)
+                    {
+                        UpdateProgressBarValue(progressBar.Maximum, totalInstallers);
+                        UpdateProgress(100);
+                    }
+                    else
+                    {
+                        UpdateProgressBarValue(Math.Min(finalCompleted, progressBar.Maximum), totalInstallers);
+                        int percent = (int)Math.Round(100.0 * finalCompleted / totalInstallers);
+                        UpdateProgress(percent);
+                    }
+                }
+                catch { UpdateProgress(100); }
+
                 AddLog("=== ALL INSTALLATIONS COMPLETE ===");
 
                 // Final UI restoration
@@ -524,6 +593,38 @@ namespace AutoInstallerApp
             }
         }
 
+        /// <summary>
+        /// Thread-safe update of the progress bar when Maximum == totalInstallers.
+        /// Sets the progressBar.Value and updates the percent label.
+        /// </summary>
+        private void UpdateProgressBarValue(int value, int total)
+        {
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new Action(() => UpdateProgressBarValue(value, total)));
+                return;
+            }
+
+            try
+            {
+                // Ensure bounds
+                if (progressBar.Maximum <= 0)
+                {
+                    progressBar.Maximum = Math.Max(1, total);
+                }
+
+                int safeValue = Math.Min(progressBar.Maximum, Math.Max(0, value));
+                progressBar.Value = safeValue;
+
+                int percent = (int)Math.Round(100.0 * safeValue / Math.Max(1, total));
+                progressBarlbl.Text = $"{percent}%";
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteException(ex, "UpdateProgressBarValue");
+            }
+        }
+
         private void UpdateProgress(int value)
         {
             if (this.InvokeRequired)
@@ -534,20 +635,22 @@ namespace AutoInstallerApp
 
             try
             {
-                // Ensure value stays within 0 - Maximum
+                // Ensure value stays within 0 - Maximum (when Maximum is 100)
                 if (value > progressBar.Maximum) value = progressBar.Maximum;
                 if (value < 0) value = 0;
 
-                progressBar.Value = value;
-
-                double percent = 0;
-                if (progressBar.Maximum > 0)
+                // Smoothly update the progress bar value
+                try
                 {
-                    percent = ((double)progressBar.Value / progressBar.Maximum) * 100;
+                    progressBar.Value = value;
+                }
+                catch
+                {
+                    progressBar.Value = Math.Min(progressBar.Maximum, Math.Max(0, value));
                 }
 
                 // Update the label with the calculated percentage
-                progressBarlbl.Text = $"{(int)percent}%";
+                progressBarlbl.Text = $"{value}%";
             }
             catch (Exception ex)
             {

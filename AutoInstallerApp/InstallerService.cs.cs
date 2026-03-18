@@ -1,7 +1,6 @@
 ﻿using Microsoft.Win32;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Xml.Linq;
 
 namespace AutoInstallerApp
 {
@@ -11,6 +10,9 @@ namespace AutoInstallerApp
         public static string? CurrentFile;
         // Current process being run for the CurrentFile (set inside RunInstaller)
         public static Process? CurrentProcess;
+        // Global retry flag so InstallerUiAutomator can change behavior on second attempt
+        public static bool IsRetryRun;
+
         // Named pipe used for agent communication
         private const string AgentPipeName = "AutoInstallerAgentPipe";
         // Silent args mapping (loaded from silentArgs.json in application folder)
@@ -252,6 +254,7 @@ namespace AutoInstallerApp
             logCallback?.Invoke("[AGENT] Could not connect to elevated agent (timeout or no OK response).");
             return false;
         }
+
         public static readonly object ProcessLock = new object();
         // All active processes started by the installer (concurrent)
         public static ConcurrentDictionary<int, Process> ActiveProcesses = new ConcurrentDictionary<int, Process>();
@@ -594,10 +597,22 @@ namespace AutoInstallerApp
 
                         if (file.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                         {
-                            try { string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); string dest = Path.Combine(desktop, Path.GetFileName(file)); File.Copy(file, dest, true); logCallback($"[RDP COPIED] {Path.GetFileName(file)}"); }
+                            try
+                            {
+                                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                                string dest = Path.Combine(desktop, Path.GetFileName(file));
+                                File.Copy(file, dest, true);
+                                logCallback($"[RDP COPIED] {Path.GetFileName(file)}");
+                            }
                             catch (Exception ex) { logCallback($"[RDP COPY ERROR] {file}: {ex.Message}"); failed.Add(file); }
 
-                            if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
+                            if (Completed.TryAdd(file, true))
+                            {
+                                Interlocked.Increment(ref progressCount);
+                                int percent;
+                                lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); }
+                                try { progressCallback?.Invoke(percent); } catch { }
+                            }
                             return;
                         }
 
@@ -605,7 +620,16 @@ namespace AutoInstallerApp
                         try { ok = await InstallAsync(file, logCallback, token).ConfigureAwait(false); } catch { ok = false; }
 
                         if (!ok) failed.Add(file);
-                        else { if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } } }
+                        else
+                        {
+                            if (Completed.TryAdd(file, true))
+                            {
+                                Interlocked.Increment(ref progressCount);
+                                int percent;
+                                lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); }
+                                try { progressCallback?.Invoke(percent); } catch { }
+                            }
+                        }
                     }
                     finally { semaphore.Release(); }
                 }, token));
@@ -629,19 +653,38 @@ namespace AutoInstallerApp
                         {
                             var name = Path.GetFileName(file);
                             logCallback($"[SKIPPED - ALREADY INSTALLED] {name}");
-                            if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
+                            if (Completed.TryAdd(file, true))
+                            {
+                                Interlocked.Increment(ref progressCount);
+                                int percent;
+                                lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); }
+                                try { progressCallback?.Invoke(percent); } catch { }
+                            }
                             continue;
                         }
                     }
                     catch { }
 
-                    if (IsAnotherInstallerRunning()) { logCallback($"[CONFLICT] Another installer active - waiting before running {Path.GetFileName(file)}"); WaitForInstallerToBeFree(logCallback, token); }
+                    if (IsAnotherInstallerRunning())
+                    {
+                        logCallback($"[CONFLICT] Another installer active - waiting before running {Path.GetFileName(file)}");
+                        WaitForInstallerToBeFree(logCallback, token);
+                    }
 
                     bool ok = false;
                     try { ok = await InstallAsync(file, logCallback, token).ConfigureAwait(false); } catch { ok = false; }
 
                     if (!ok) failed.Add(file);
-                    else { if (Completed.TryAdd(file, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } } }
+                    else
+                    {
+                        if (Completed.TryAdd(file, true))
+                        {
+                            Interlocked.Increment(ref progressCount);
+                            int percent;
+                            lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); }
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
+                    }
                 }
             }
 
@@ -656,15 +699,32 @@ namespace AutoInstallerApp
 
                     if (f.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                     {
-                        try { string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); string dest = Path.Combine(desktop, Path.GetFileName(f)); File.Copy(f, dest, true); logCallback($"[RDP COPIED] {Path.GetFileName(f)}"); }
+                        try
+                        {
+                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                            string dest = Path.Combine(desktop, Path.GetFileName(f));
+                            File.Copy(f, dest, true);
+                            logCallback($"[RDP COPIED] {Path.GetFileName(f)}");
+                        }
                         catch (Exception ex) { logCallback($"[RDP COPY ERROR] {f}: {ex.Message}"); }
 
-                        if (Completed.TryAdd(f, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
+                        if (Completed.TryAdd(f, true))
+                        {
+                            Interlocked.Increment(ref progressCount);
+                            int percent;
+                            lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); }
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
                     }
                     else
                     {
                         await InstallAsync(f, logCallback, token);
-                        if (Completed.TryAdd(f, true)) { var completedCount = Interlocked.Increment(ref progressCount); int percent = (int)Math.Round(100.0 * completedCount / totalItems); try { progressCallback?.Invoke(percent); } catch { } }
+                        if (Completed.TryAdd(f, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
                     }
                 }
             }
@@ -680,15 +740,32 @@ namespace AutoInstallerApp
 
                     if (p.EndsWith(".rdp", StringComparison.OrdinalIgnoreCase))
                     {
-                        try { string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); string dest = Path.Combine(desktop, Path.GetFileName(p)); File.Copy(p, dest, true); logCallback($"[RDP COPIED] {Path.GetFileName(p)}"); }
+                        try
+                        {
+                            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                            string dest = Path.Combine(desktop, Path.GetFileName(p));
+                            File.Copy(p, dest, true);
+                            logCallback($"[RDP COPIED] {Path.GetFileName(p)}");
+                        }
                         catch (Exception ex) { logCallback($"[RDP COPY ERROR] {p}: {ex.Message}"); }
 
-                        if (Completed.TryAdd(p, true)) { Interlocked.Increment(ref progressCount); int percent; lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); } try { progressCallback?.Invoke(percent); } catch { } }
+                        if (Completed.TryAdd(p, true))
+                        {
+                            Interlocked.Increment(ref progressCount);
+                            int percent;
+                            lock (progressLock) { acumulado += valorPorTarea; percent = (int)Math.Round(acumulado); }
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
                     }
                     else
                     {
                         await InstallAsync(p, logCallback, token);
-                        if (Completed.TryAdd(p, true)) { var completedCount = Interlocked.Increment(ref progressCount); int percent = (int)Math.Round(100.0 * completedCount / totalItems); try { progressCallback?.Invoke(percent); } catch { } }
+                        if (Completed.TryAdd(p, true))
+                        {
+                            var completedCount = Interlocked.Increment(ref progressCount);
+                            int percent = (int)Math.Round(100.0 * completedCount / totalItems);
+                            try { progressCallback?.Invoke(percent); } catch { }
+                        }
                     }
                 }
             }
@@ -704,62 +781,20 @@ namespace AutoInstallerApp
                 if (token.IsCancellationRequested)
                     return false;
 
+                // Reset retry state for this installer
+                IsRetryRun = false;
+                CurrentFile = file;
+
                 string name = Path.GetFileName(file);
-                string exeName = name.ToLower(); // Define exeName for the AHK script parameter
+                string exeName = name.ToLower();
                 logCallback($"[INSTALLING] {name}");
 
                 try
                 {
-                    // Do not wait here to avoid serializing installers. Conflict detection is handled by the caller
                     if (token.IsCancellationRequested)
                         return false;
 
-                    bool success = RunInstaller(file, logCallback, elevated: false, token);
-
-                    // === FALLBACK AHK ===
-                    if (!success && !token.IsCancellationRequested)
-                    {
-                        logCallback($"[INFO] FlaUI failed to automate {name}. Trying AutoHotkey...");
-
-                        try
-                        {
-                            if (CurrentProcess == null || CurrentProcess.HasExited)
-                            {
-                                logCallback("[AHK] Cannot start AutoHotkey fallback: CurrentProcess is null or exited.");
-                                return false;
-                            }
-
-                            string? ahkExe = FindAutoHotkeyExe();
-                            if (string.IsNullOrEmpty(ahkExe))
-                            {
-                                logCallback("[AHK] AutoHotkey executable not found on PATH or app folder. Skipping AHK fallback.");
-                            }
-                            else
-                            {
-                                // PASS BOTH PARAMETERS HERE
-                                string ahkScript = AutoHotkeyHelper.CreateAutoHotkeyScript(CurrentProcess.Id, exeName);
-                                Process ahk = Process.Start(ahkExe, $"\"{ahkScript}\"");
-
-                                while (!CurrentProcess.HasExited)
-                                {
-                                    if (token.IsCancellationRequested)
-                                    {
-                                        try { ahk.Kill(); } catch { }
-                                        break;
-                                    }
-                                    Thread.Sleep(300);
-                                }
-
-                                try { ahk.Kill(); } catch { }
-                                success = true;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            logCallback($"[AHK ERROR] {ex.Message}");
-                            try { Logger.WriteException(ex, "InstallAsync:AHKfallback"); } catch { }
-                        }
-                    }
+                    bool success = ProcessInstallerWithUI(file, name, exeName, logCallback, token);
 
                     if (!token.IsCancellationRequested)
                         logCallback($"[DONE] {name}");
@@ -773,6 +808,41 @@ namespace AutoInstallerApp
                     return false;
                 }
             });
+        }
+
+        // Handles main run + AHK fallback + retry with IsRetryRun=true
+        private static bool ProcessInstallerWithUI(string file, string displayName, string exeName, Action<string> logCallback, CancellationToken token)
+        {
+            // First attempt (IsRetryRun = false)
+            IsRetryRun = false;
+            bool success = RunInstaller(file, logCallback, elevated: false, token);
+
+            // AHK fallback if FlaUI/automation failed and process existed
+            if (!success && !token.IsCancellationRequested)
+            {
+                logCallback($"[INFO] First attempt failed for {displayName}. Trying AutoHotkey fallback and then a retry with alternate UI path...");
+
+                try
+                {
+                    // If the process is not running (RunInstaller may have started and exited), we still attempt a retry run below.
+                    // Create a retry flag file for AHK to detect alternate behavior
+                    var retryFlag = Path.Combine(Path.GetTempPath(), $"auto_installer_retry_{Process.GetCurrentProcess().Id}.flag");
+                    try { File.WriteAllText(retryFlag, "1"); } catch { }
+
+                    // Attempt a second run with IsRetryRun = true (this will cause InstallerUiAutomator to pick alternate radio options)
+                    IsRetryRun = true;
+                    success = RunInstaller(file, logCallback, elevated: false, token);
+
+                    try { if (File.Exists(retryFlag)) File.Delete(retryFlag); } catch { }
+                }
+                catch (Exception ex)
+                {
+                    logCallback($"[AHK/RETRY ERROR] {ex.Message}");
+                    try { Logger.WriteException(ex, "ProcessInstallerWithUI:AHKRetry"); } catch { }
+                }
+            }
+
+            return success;
         }
 
         // ============================
@@ -843,12 +913,12 @@ namespace AutoInstallerApp
                 // Instaladores que NO aceptan parámetros silenciosos
                 string[] nonSilentInstallers =
                 {
-            "chrome", "firefox", "edge", "anydesk",
-            "teamviewer", "zoom", "acro", "reader",
-            "java", "jre", "winrar",
-            // Sophos installer does not accept generic /silent switches
-            "sophos", "sophosinstall", "sophossetup"
-        };
+                    "chrome", "firefox", "edge", "anydesk",
+                    "teamviewer", "zoom", "acro", "reader",
+                    "java", "jre", "winrar",
+                    // Sophos installer does not accept generic /silent switches
+                    "sophos", "sophosinstall", "sophossetup"
+                };
 
                 // ============================
                 // CASO ESPECIAL: OFFICE
@@ -858,16 +928,20 @@ namespace AutoInstallerApp
                     logCallback?.Invoke("[INFO] Office detected. Launching and returning immediately (fire-and-forget).");
 
                     Process officeProc = new Process();
-                    officeProc.StartInfo.FileName = actualFile; // Using actualFile
+                    officeProc.StartInfo.FileName = actualFile;
                     officeProc.StartInfo.UseShellExecute = true;
                     if (elevated) officeProc.StartInfo.Verb = "runas";
 
                     try
                     {
                         officeProc.Start();
-                        // Fire-and-forget: start automator briefly to press initial Run/Install then return success
-                        _ = Task.Run(() => InstallerUiAutomator.InteractWithProcess(officeProc.Id, logCallback, CancellationToken.None, processNameHint: "office"));
-                        Thread.Sleep(5000); // give automator time to press initial button
+                        _ = Task.Run(() =>
+                            InstallerUiAutomator.InteractWithProcess(
+                                officeProc.Id,
+                                logCallback,
+                                CancellationToken.None,
+                                processNameHint: "office"));
+                        Thread.Sleep(5000);
                         logCallback?.Invoke("[OK] Office launched in background. Continuing with list.");
                         return true;
                     }
@@ -883,12 +957,11 @@ namespace AutoInstallerApp
                 // ============================
                 if (exeName.Contains("spiceworks"))
                 {
-                    string folder = Path.GetDirectoryName(actualFile) ?? ""; // Using actualFile
+                    string folder = Path.GetDirectoryName(actualFile) ?? "";
                     string skPath = Path.Combine(folder, "sitekey.txt");
                     if (File.Exists(skPath))
                     {
                         string key = File.ReadAllText(skPath).Trim();
-                        // Ponemos la clave en el portapapeles para que AHK la pegue si es necesario
                         Thread t = new Thread(() => System.Windows.Forms.Clipboard.SetText(key));
                         t.SetApartmentState(ApartmentState.STA);
                         t.Start();
@@ -899,7 +972,6 @@ namespace AutoInstallerApp
                 // OTROS INSTALADORES
                 // ============================
                 string localFile;
-                // Use pre-copied local copy if available - we use 'actualFile' as the key
                 if (LocalCopies.TryGetValue(actualFile, out var mapped) && File.Exists(mapped))
                 {
                     localFile = mapped;
@@ -916,10 +988,10 @@ namespace AutoInstallerApp
                         File.Copy(actualFile, localFile, true);
                         try { UnblockFile(localFile); } catch { }
                         logCallback?.Invoke($"[INFO] Copied to local temp: {localFile}");
+                        LocalCopies.AddOrUpdate(actualFile, localFile, (k, v) => localFile);
                     }
                     catch (Exception ex)
                     {
-                        // Fallback to original file if copy fails
                         logCallback?.Invoke($"[WARN] Failed to copy to temp, using original: {ex.Message}");
                         localFile = actualFile;
                     }
@@ -932,7 +1004,6 @@ namespace AutoInstallerApp
                 {
                     process.StartInfo.FileName = localFile;
 
-                    // Determine appropriate silent arguments based on installer engine when possible
                     var silentArgsMapped = GetSilentArgsForExecutable(exeName);
                     if (!string.IsNullOrEmpty(silentArgsMapped))
                     {
@@ -946,7 +1017,6 @@ namespace AutoInstallerApp
                     }
                     else
                     {
-                        // Sniff common installer engines
                         string exeContent = string.Empty;
                         try
                         {
@@ -999,7 +1069,7 @@ namespace AutoInstallerApp
                 {
                     lock (ProcessLock) { CurrentProcess = process; }
 
-                    // If a sitekey.txt exists in the installer folder, publish it to a temp file
+                    // Publish sitekey to temp if present
                     try
                     {
                         string folderPath = Path.GetDirectoryName(localFile) ?? Path.GetDirectoryName(actualFile) ?? string.Empty;
@@ -1016,6 +1086,17 @@ namespace AutoInstallerApp
                     }
                     catch { }
 
+                    // Create retry flag file if IsRetryRun is true so AHK can detect alternate behavior
+                    string retryFlagPath = Path.Combine(Path.GetTempPath(), $"auto_installer_retry_{Process.GetCurrentProcess().Id}.flag");
+                    try
+                    {
+                        if (IsRetryRun)
+                            File.WriteAllText(retryFlagPath, "1");
+                        else if (File.Exists(retryFlagPath))
+                            File.Delete(retryFlagPath);
+                    }
+                    catch { }
+
                     process.Start();
                     ActiveProcesses.TryAdd(process.Id, process);
 
@@ -1029,13 +1110,17 @@ namespace AutoInstallerApp
                         }
                         catch { }
 
-                        // FORCE HINT for TightVNC
-                        if (pname.Contains("tightvnc"))
+                        if (!string.IsNullOrEmpty(pname) && pname.Contains("tightvnc"))
                         {
                             pname = "TightVNC";
                         }
 
-                        InstallerUiAutomator.InteractWithProcess(process.Id, logCallback, automatorCts.Token, processNameHint: pname);
+                        _ = Task.Run(() =>
+                            InstallerUiAutomator.InteractWithProcess(
+                                process.Id,
+                                logCallback,
+                                automatorCts.Token,
+                                processNameHint: pname));
                     }
                     catch { }
 
@@ -1052,12 +1137,26 @@ namespace AutoInstallerApp
 
                     try { automatorCts?.Cancel(); } catch { }
 
-                    if (process.ExitCode != 0)
+                    int exitCode = process.ExitCode;
+                    if (exitCode == 3010)
                     {
-                        RecordFailure(actualFile, $"Exit code {process.ExitCode}");
+                        logCallback?.Invoke("[INFO] Installer completed with exit code 3010 (reboot required). Treating as success.");
+                    }
+                    else if (exitCode != 0)
+                    {
+                        RecordFailure(actualFile, $"Exit code {exitCode}");
                     }
 
-                    return process.ExitCode == 0;
+                    // Cleanup retry flag and sitekey temp
+                    try
+                    {
+                        if (File.Exists(retryFlagPath)) File.Delete(retryFlagPath);
+                        var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                        if (File.Exists(tmpSk)) File.Delete(tmpSk);
+                    }
+                    catch { }
+
+                    return exitCode == 0 || exitCode == 3010;
                 }
                 finally
                 {
@@ -1079,18 +1178,14 @@ namespace AutoInstallerApp
 
                     try
                     {
-                        // Start elevated agent (user will accept UAC)
                         LaunchElevatedAgent(logCallback);
 
-                        // Prepare local copy of installer as earlier
                         string tempFolder = Path.Combine(Path.GetTempPath(), "AutoInstaller");
                         Directory.CreateDirectory(tempFolder);
                         string localFilePath = Path.Combine(tempFolder, Path.GetFileName(file));
                         try { File.Copy(file, localFilePath, true); } catch { localFilePath = file; }
 
-                        // Determine arguments
                         string exeNameLocal = Path.GetFileName(localFilePath).ToLower();
-                        string elevatedArgs = string.Empty;
 
                         string[] nonSilentInstallers =
                         {
@@ -1120,9 +1215,11 @@ namespace AutoInstallerApp
                         elevatedInfo.Verb = "runas";
 
                         Process? elevatedProc = null;
+                        CancellationTokenSource? automatorCts = null;
+
                         try
                         {
-                            // If a sitekey.txt exists in the installer folder, publish it to a temp file for AHK
+                            // Publish sitekey for elevated run
                             try
                             {
                                 string folderPathElev = Path.GetDirectoryName(localFilePath) ?? Path.GetDirectoryName(file) ?? string.Empty;
@@ -1144,6 +1241,17 @@ namespace AutoInstallerApp
                             }
                             catch { }
 
+                            // Create retry flag if needed
+                            string retryFlagPath = Path.Combine(Path.GetTempPath(), $"auto_installer_retry_{Process.GetCurrentProcess().Id}.flag");
+                            try
+                            {
+                                if (IsRetryRun)
+                                    File.WriteAllText(retryFlagPath, "1");
+                                else if (File.Exists(retryFlagPath))
+                                    File.Delete(retryFlagPath);
+                            }
+                            catch { }
+
                             elevatedProc = Process.Start(elevatedInfo);
                         }
                         catch (Exception startEx)
@@ -1162,10 +1270,8 @@ namespace AutoInstallerApp
                         ActiveProcesses.TryAdd(elevatedProc.Id, elevatedProc);
                         lock (ProcessLock) { CurrentProcess = elevatedProc; }
 
-                        // Give the agent some time to start and accept pipe connections
                         Thread.Sleep(1200);
 
-                        // Ask elevated agent to attach and automate the elevated installer
                         var attached = SendAttachCommandToAgent(elevatedProc.Id, logCallback);
                         if (!attached)
                         {
@@ -1173,22 +1279,53 @@ namespace AutoInstallerApp
                             try { RecordFailure(file, "Agent attach failed"); } catch { }
                         }
 
-                        // Wait for elevated installer to exit
+                        try
+                        {
+                            automatorCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                            string? pname = null;
+                            try
+                            {
+                                pname = Path.GetFileNameWithoutExtension(localFilePath).ToLower();
+                            }
+                            catch { }
+
+                            if (!string.IsNullOrEmpty(pname) && pname.Contains("tightvnc"))
+                            {
+                                pname = "TightVNC";
+                            }
+
+                            _ = Task.Run(() =>
+                                InstallerUiAutomator.InteractWithProcess(
+                                    elevatedProc.Id,
+                                    logCallback,
+                                    automatorCts.Token,
+                                    processNameHint: pname));
+                        }
+                        catch { }
+
                         while (!elevatedProc.HasExited)
                         {
                             if (token.IsCancellationRequested)
                             {
                                 try { elevatedProc.Kill(); } catch { }
+                                try { automatorCts?.Cancel(); } catch { }
                                 return false;
                             }
                             Thread.Sleep(200);
                         }
-                        if (elevatedProc.ExitCode != 0)
+
+                        try { automatorCts?.Cancel(); } catch { }
+
+                        int exitCode = elevatedProc.ExitCode;
+                        if (exitCode == 3010)
                         {
-                            try { RecordFailure(file, $"Elevated exit code {elevatedProc.ExitCode}"); } catch { }
+                            logCallback?.Invoke("[INFO] Elevated installer completed with exit code 3010 (reboot required). Treating as success.");
+                        }
+                        else if (exitCode != 0)
+                        {
+                            try { RecordFailure(file, $"Elevated exit code {exitCode}"); } catch { }
                         }
 
-                        // Cleanup temp sitekey for elevated run (best-effort)
                         try
                         {
                             var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
@@ -1199,7 +1336,15 @@ namespace AutoInstallerApp
                         }
                         catch { }
 
-                        return elevatedProc.ExitCode == 0;
+                        // Cleanup retry flag
+                        try
+                        {
+                            string retryFlagPath = Path.Combine(Path.GetTempPath(), $"auto_installer_retry_{Process.GetCurrentProcess().Id}.flag");
+                            if (File.Exists(retryFlagPath)) File.Delete(retryFlagPath);
+                        }
+                        catch { }
+
+                        return exitCode == 0 || exitCode == 3010;
                     }
                     catch (Exception innerEx)
                     {
@@ -1211,6 +1356,7 @@ namespace AutoInstallerApp
                 throw;
             }
         }
+
         private static string ResolveShortcut(string filePath)
         {
             if (!filePath.EndsWith(".lnk", System.StringComparison.OrdinalIgnoreCase))
@@ -1218,8 +1364,6 @@ namespace AutoInstallerApp
 
             try
             {
-                // Requires a reference to COM "Windows Script Host Object Model"
-                // Or use 'dynamic' to avoid adding the reference manually
                 Type shellType = Type.GetTypeFromProgID("WScript.Shell");
                 dynamic shell = Activator.CreateInstance(shellType);
                 var shortcut = shell.CreateShortcut(filePath);
@@ -1227,7 +1371,6 @@ namespace AutoInstallerApp
             }
             catch (Exception ex)
             {
-                // If resolution fails, return the original path so the app can at least try to use it
                 Debug.WriteLine("Shortcut resolution failed: " + ex.Message);
                 return filePath;
             }

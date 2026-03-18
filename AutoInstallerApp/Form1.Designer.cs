@@ -73,6 +73,7 @@ namespace AutoInstallerApp
             progressBar.Location = new Point(12, 168);
             progressBar.Name = "progressBar";
             progressBar.Size = new Size(518, 25);
+            progressBar.Style = ProgressBarStyle.Continuous;
             progressBar.TabIndex = 2;
             // 
             // btnOpenLog
@@ -114,7 +115,7 @@ namespace AutoInstallerApp
             // 
             // pictureBox1
             // 
-            pictureBox1.Image = Properties.Resources.AIA;
+            pictureBox1.Image = (Image)resources.GetObject("pictureBox1.Image");
             pictureBox1.Location = new Point(459, 9);
             pictureBox1.Name = "pictureBox1";
             pictureBox1.Size = new Size(121, 118);
@@ -145,7 +146,7 @@ namespace AutoInstallerApp
             progressBarlbl.BackColor = Color.Transparent;
             progressBarlbl.FlatStyle = FlatStyle.Flat;
             progressBarlbl.Font = new Font("Segoe UI", 9F, FontStyle.Bold, GraphicsUnit.Point, 0);
-            progressBarlbl.Location = new Point(544, 173);
+            progressBarlbl.Location = new Point(536, 173);
             progressBarlbl.Name = "progressBarlbl";
             progressBarlbl.Size = new Size(24, 15);
             progressBarlbl.TabIndex = 12;
@@ -191,6 +192,6 @@ namespace AutoInstallerApp
         private Label lblTimer;
         private Label progressBarlbl;
         private Label lblProgress;
-        
+
     }
 }

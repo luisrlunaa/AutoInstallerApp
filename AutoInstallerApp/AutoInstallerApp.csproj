@@ -45,6 +45,10 @@
 	</ItemGroup>
 
 	<ItemGroup>
+	  <None Include="Properties\PublishProfiles\FolderProfile.pubxml.user" />
+	</ItemGroup>
+
+	<ItemGroup>
 	  <EmbeddedResource Update="Properties\Resources.resx">
 	    <Generator>ResXFileCodeGenerator</Generator>
 	    <LastGenOutput>Resources.Designer.cs</LastGenOutput>
