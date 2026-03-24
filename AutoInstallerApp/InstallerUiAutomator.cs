@@ -849,7 +849,7 @@ namespace AutoInstallerApp
                                         try
                                         {
                                             // Attach to top-level windows of this process
-                                            var wins = automation.GetDesktop().FindAllChildren(cf => cf.ByProcessId(proc.Id) && cf.ByControlType(ControlType.Window));
+                                            var wins = automation.GetDesktop().FindAllChildren(cf => cf.ByProcessId(proc.Id).And(cf.ByControlType(ControlType.Window)));
                                             foreach (var w in wins)
                                             {
                                                 try
