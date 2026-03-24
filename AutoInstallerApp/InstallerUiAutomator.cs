@@ -182,6 +182,55 @@ namespace AutoInstallerApp
             catch { return null; }
         }
 
+        // NEW: Publish the found sitekey into %TEMP%\auto_installer_sitekey.txt so AHK and other fallbacks can use it.
+        // Returns the path to the temp file if published, otherwise null.
+        private static string? PublishSiteKeyToTemp(string? installerPath, Action<string>? logCallback)
+        {
+            try
+            {
+                var siteKeyPath = FindSiteKeyNearInstaller(installerPath);
+                if (siteKeyPath == null)
+                {
+                    // Also check if InstallerService already published a temp sitekey
+                    var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                    if (File.Exists(tmpSk))
+                    {
+                        logCallback?.Invoke($"[AUTOMATOR] Temp sitekey already present at {tmpSk}");
+                        return tmpSk;
+                    }
+
+                    logCallback?.Invoke("[AUTOMATOR] No sitekey file found near installer.");
+                    return null;
+                }
+
+                string keyText = File.ReadAllText(siteKeyPath).Trim();
+                if (string.IsNullOrEmpty(keyText))
+                {
+                    logCallback?.Invoke($"[AUTOMATOR] Found sitekey file at {siteKeyPath} but it is empty.");
+                    return null;
+                }
+
+                var dest = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
+                try
+                {
+                    File.WriteAllText(dest, keyText);
+                    logCallback?.Invoke($"[AUTOMATOR] Published sitekey to temp: {dest}");
+                    return dest;
+                }
+                catch (Exception ex)
+                {
+                    logCallback?.Invoke($"[AUTOMATOR] Failed to publish sitekey to temp: {ex.Message}");
+                    try { Logger.WriteException(ex, "PublishSiteKeyToTemp"); } catch { }
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                try { Logger.WriteException(ex, "PublishSiteKeyToTemp"); } catch { }
+                return null;
+            }
+        }
+
         // UPDATED: Try to auto-fill TightVNC password fields using UI elements or Keyboard fallback
         private static bool TryAutoFillTightVnc(Window win, Action<string>? logCallback)
         {
@@ -272,7 +321,7 @@ namespace AutoInstallerApp
                 var siteKeyPath = FindSiteKeyNearInstaller(installerPath);
                 if (siteKeyPath == null)
                 {
-                    // Also check temp sitekey published by InstallerService
+                    // Also check temp sitekey published by InstallerService or by this automator
                     var tmpSk = Path.Combine(Path.GetTempPath(), "auto_installer_sitekey.txt");
                     if (File.Exists(tmpSk)) siteKeyPath = tmpSk;
                 }
@@ -553,6 +602,72 @@ namespace AutoInstallerApp
             return false;
         }
 
+        // NEW: Try to force-click a final button (Finish/Done/Close) while avoiding negative buttons
+        private static bool TryForceFinalButtonClick(Window win, Action<string>? logCallback)
+        {
+            try
+            {
+                var buttons = win.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
+                foreach (var b in buttons)
+                {
+                    try
+                    {
+                        var name = (b.Name ?? string.Empty).Trim().ToLowerInvariant();
+                        if (string.IsNullOrWhiteSpace(name)) continue;
+
+                        // Avoid negative buttons
+                        if (NegativeButtonWords.Any(nb => name.Contains(nb))) continue;
+
+                        // If matches final-only list, invoke
+                        if (FinalOnlyButtonNames.Any(f => name.Contains(f)))
+                        {
+                            var btn = b.AsButton();
+                            if (btn != null && btn.IsEnabled)
+                            {
+                                btn.Invoke();
+                                logCallback?.Invoke($"[AUTOMATOR] Invoked final button '{b.Name}'");
+                                return true;
+                            }
+                        }
+
+                        // Heuristic: texts that indicate completion
+                        if (name.Contains("completed") || name.Contains("success") || name.Contains("installation complete") || name.Contains("installation finished"))
+                        {
+                            var btn = b.AsButton();
+                            if (btn != null && btn.IsEnabled)
+                            {
+                                btn.Invoke();
+                                logCallback?.Invoke($"[AUTOMATOR] Invoked likely final button '{b.Name}'");
+                                return true;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // If no UIA final button found, try Tab->Enter fallback to reach final button
+                try
+                {
+                    win.Focus();
+                    Thread.Sleep(120);
+                    for (int i = 0; i < 10; i++)
+                    {
+                        FlaUI.Core.Input.Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.TAB);
+                        Thread.Sleep(80);
+                    }
+                    FlaUI.Core.Input.Keyboard.Press(FlaUI.Core.WindowsAPI.VirtualKeyShort.RETURN);
+                    logCallback?.Invoke("[AUTOMATOR] Sent Tab x10 + Enter as final fallback.");
+                    return true;
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                try { Logger.WriteException(ex, "TryForceFinalButtonClick"); } catch { }
+            }
+            return false;
+        }
+
         public static void InteractWithProcess(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs = 120000, string? processNameHint = null)
         {
             // Fire-and-forget the async worker; capture the returned Task to avoid analyzer warnings
@@ -562,6 +677,10 @@ namespace AutoInstallerApp
         // P/Invoke for SetForegroundWindow and keybd_event as a fallback to send Enter
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
@@ -643,284 +762,246 @@ namespace AutoInstallerApp
                     {
                         try
                         {
-                            var pidObj = mo["ProcessId"];
-                            var ppidObj = mo["ParentProcessId"];
-                            if (pidObj == null) continue;
-                            int p = Convert.ToInt32(pidObj);
-                            int? pp = null;
-                            if (ppidObj != null) pp = Convert.ToInt32(ppidObj);
-                            map[p] = pp;
+                            int pid = Convert.ToInt32(mo["ProcessId"]);
+                            int? ppid = null;
+                            try { ppid = mo["ParentProcessId"] != null ? Convert.ToInt32(mo["ParentProcessId"]) : (int?)null; } catch { }
+                            map[pid] = ppid;
                         }
-                        catch (Exception ex) { try { Logger.WriteException(ex); } catch { } }
+                        catch { }
                     }
                 }
 
                 // BFS from rootPid
-                var queue = new Queue<int>();
-                queue.Enqueue(rootPid);
-                while (queue.Count > 0)
+                var q = new Queue<int>();
+                q.Enqueue(rootPid);
+                while (q.Count > 0)
                 {
-                    var cur = queue.Dequeue();
+                    var cur = q.Dequeue();
+                    results.Add(cur);
                     foreach (var kv in map)
                     {
                         if (kv.Value == cur)
                         {
-                            if (!results.Contains(kv.Key))
-                            {
-                                results.Add(kv.Key);
-                                queue.Enqueue(kv.Key);
-                            }
+                            q.Enqueue(kv.Key);
                         }
                     }
                 }
             }
-            catch { }
-
+            catch (Exception ex) { try { Logger.WriteException(ex, "GetDescendantProcessIds"); } catch { } }
             return results;
         }
 
-        private static async Task InteractWithProcessAsync(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs, string? processNameHint)
+        // Core async worker that attaches to the process and automates windows
+        private static async Task InteractWithProcessAsync(int pid, Action<string> logCallback, CancellationToken token, int timeoutMs = 120000, string? processNameHint = null)
         {
             try
             {
-                using var automation = new UIA3Automation();
+                logCallback?.Invoke($"[AUTOMATOR] InteractWithProcessAsync started for PID={pid}, hint={processNameHint}");
 
-                FlaUI.Core.Application app;
+                // Publish sitekey to temp before any AHK or clipboard-based fallback runs.
                 try
                 {
-                    app = FlaUI.Core.Application.Attach(pid);
+                    // Prefer InstallerService.CurrentFile if available; otherwise use processNameHint to attempt resolution
+                    string? installerPath = InstallerService.CurrentFile;
+                    if (string.IsNullOrEmpty(installerPath) && !string.IsNullOrEmpty(processNameHint))
+                    {
+                        // Attempt to find a local copy in InstallerService.LocalCopies that matches processNameHint
+                        try
+                        {
+                            var match = InstallerService.LocalCopies.FirstOrDefault(kv => Path.GetFileName(kv.Key).IndexOf(processNameHint ?? string.Empty, StringComparison.OrdinalIgnoreCase) >= 0);
+                            if (!string.IsNullOrEmpty(match.Value))
+                                installerPath = match.Value;
+                        }
+                        catch { }
+                    }
+
+                    var published = PublishSiteKeyToTemp(installerPath, logCallback);
+                    if (published != null)
+                    {
+                        logCallback?.Invoke("[AUTOMATOR] Sitekey published to temp for use by AHK/clipboard fallbacks.");
+                    }
                 }
                 catch (Exception ex)
                 {
-                    logCallback?.Invoke($"[AUTOMATOR] Could not attach to PID {pid}: {ex.Message}");
-                    return;
+                    try { Logger.WriteException(ex, "InteractWithProcessAsync:PublishSiteKey"); } catch { }
                 }
 
-                var sw = Stopwatch.StartNew();
-                var seenWindows = new HashSet<int>();
-                while (!token.IsCancellationRequested && sw.ElapsedMilliseconds < timeoutMs)
+                // Create automation app and attach to windows for the target process and its descendants
+                using (var automation = new UIA3Automation())
                 {
-                    try
+                    var sw = Stopwatch.StartNew();
+                    var seenWindowHandles = new HashSet<int>();
+
+                    // We'll poll for windows belonging to the PID and its descendants until timeout or cancellation
+                    while (!token.IsCancellationRequested && sw.ElapsedMilliseconds < timeoutMs)
                     {
-                        var procs = new List<Process> { Process.GetProcessById(pid) };
-                        // include descendants
-                        var desc = GetDescendantProcessIds(pid);
-                        foreach (var d in desc)
+                        try
                         {
-                            try { procs.Add(Process.GetProcessById(d)); } catch { }
-                        }
-
-                        foreach (var p in procs)
-                        {
-                            try
+                            // Get descendant PIDs to include child processes that host UI
+                            var pids = GetDescendantProcessIds(pid);
+                            foreach (var p in pids)
                             {
-                                var windows = automation.GetDesktop().FindAllChildren(cf => cf.ByProcessId(p.Id)).Where(e => e.ControlType == ControlType.Window).ToArray();
-                                foreach (var w in windows)
+                                try
                                 {
-                                    try
+                                    var procs = Process.GetProcesses().Where(pp => pp.Id == p).ToArray();
+                                    foreach (var proc in procs)
                                     {
-                                        var win = w.AsWindow();
-                                        if (win == null) continue;
-                                        var handleProp = win.Properties.NativeWindowHandle;
-                                        int handle = 0;
-                                        try { handle = Convert.ToInt32(handleProp?.Value ?? 0); } catch { }
-                                        if (handle != 0 && seenWindows.Contains(handle)) continue;
-                                        if (handle != 0) seenWindows.Add(handle);
-
-                                        // Skip offscreen windows
-                                        if (IsWindowOffscreenSafe(win)) continue;
-
-                                        logCallback?.Invoke($"[AUTOMATOR] Inspecting window '{win.Title}' (pid={p.Id})");
-
-                                        // Force checkboxes for acceptance
                                         try
                                         {
-                                            var cbs = win.FindAllDescendants(cf => cf.ByControlType(ControlType.CheckBox));
-                                            foreach (var cb in cbs)
+                                            // Attach to top-level windows of this process
+                                            var wins = automation.GetDesktop().FindAllChildren(cf => cf.ByProcessId(proc.Id) && cf.ByControlType(ControlType.Window));
+                                            foreach (var w in wins)
                                             {
                                                 try
                                                 {
-                                                    var name = cb.Name ?? string.Empty;
-                                                    if (string.IsNullOrWhiteSpace(name)) continue;
-                                                    if (AcceptCheckboxTexts.Any(t => name.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0) || name.IndexOf("agree", StringComparison.OrdinalIgnoreCase) >= 0)
+                                                    var win = w.AsWindow();
+                                                    if (win == null) continue;
+
+                                                    // Avoid reprocessing same window handle repeatedly
+                                                    int h = 0;
+                                                    try
                                                     {
-                                                        var box = cb.AsCheckBox();
-                                                        if (box != null && (box.IsChecked == false || box.IsChecked == null))
+                                                        var hv = win.Properties.NativeWindowHandle?.Value;
+                                                        if (hv != null) h = Convert.ToInt32(hv);
+                                                    }
+                                                    catch { }
+
+                                                    if (h != 0 && seenWindowHandles.Contains(h)) continue;
+                                                    if (h != 0) seenWindowHandles.Add(h);
+
+                                                    // Skip invisible/offscreen windows
+                                                    if (IsWindowOffscreenSafe(win)) continue;
+
+                                                    var title = win.Title ?? string.Empty;
+                                                    logCallback?.Invoke($"[AUTOMATOR] Inspecting window: PID={proc.Id}, Title='{title}'");
+
+                                                    // 1) Try TightVNC autofill
+                                                    try
+                                                    {
+                                                        if (TryAutoFillTightVnc(win, logCallback))
                                                         {
-                                                            box.IsChecked = true;
-                                                            logCallback?.Invoke("[AUTOMATOR] Checked acceptance checkbox");
+                                                            logCallback?.Invoke("[AUTOMATOR] TightVNC autofill handled.");
+                                                            continue;
                                                         }
                                                     }
-                                                }
-                                                catch { }
-                                            }
-                                        }
-                                        catch { }
+                                                    catch (Exception ex) { try { Logger.WriteException(ex, "TryAutoFillTightVnc"); } catch { } }
 
-                                        // Radio handling: choose first option on first run, second option on retry
-                                        try
-                                        {
-                                            var radios = win.FindAllDescendants(cf => cf.ByControlType(ControlType.RadioButton));
-                                            if (radios != null && radios.Length > 0)
-                                            {
-                                                int choiceIndex = InstallerService.IsRetryRun ? 1 : 0;
-                                                if (choiceIndex >= radios.Length) choiceIndex = 0;
-                                                try
-                                                {
-                                                    var rb = radios[choiceIndex].AsRadioButton();
-                                                    if (rb != null && rb.IsEnabled)
+                                                    // 2) Try license/sitekey autofill
+                                                    try
                                                     {
-                                                        rb.IsChecked = true;
-                                                        logCallback?.Invoke($"[AUTOMATOR] Selected radio index {choiceIndex} ({rb.Name}) for IsRetryRun={InstallerService.IsRetryRun}");
+                                                        if (TryAutoFillLicense(win, logCallback))
+                                                        {
+                                                            logCallback?.Invoke("[AUTOMATOR] License/sitekey autofill handled.");
+                                                            continue;
+                                                        }
                                                     }
-                                                }
-                                                catch { }
-                                            }
-                                        }
-                                        catch { }
+                                                    catch (Exception ex) { try { Logger.WriteException(ex, "TryAutoFillLicense"); } catch { } }
 
-                                        // Try TightVNC autofill
-                                        try
-                                        {
-                                            if (TryAutoFillTightVnc(win, logCallback))
-                                            {
-                                                logCallback?.Invoke("[AUTOMATOR] TightVNC autofill attempted.");
-                                            }
-                                        }
-                                        catch { }
-
-                                        // Try license/sitekey autofill
-                                        try
-                                        {
-                                            if (TryAutoFillLicense(win, logCallback))
-                                            {
-                                                logCallback?.Invoke("[AUTOMATOR] License/sitekey autofill attempted.");
-                                            }
-                                        }
-                                        catch { }
-
-                                        // Special-case Sophos
-                                        try
-                                        {
-                                            if (TryHandleSophos(win, logCallback))
-                                            {
-                                                logCallback?.Invoke("[AUTOMATOR] Sophos handler acted on window.");
-                                                continue;
-                                            }
-                                        }
-                                        catch { }
-
-                                        // Web bootstrapper heuristics
-                                        try
-                                        {
-                                            if (TryAutomateWebBootstrapper(win, logCallback))
-                                            {
-                                                logCallback?.Invoke("[AUTOMATOR] Web bootstrapper heuristics applied.");
-                                                continue;
-                                            }
-                                        }
-                                        catch { }
-
-                                        // Buttons: prefer positive actions, never click negatives
-                                        try
-                                        {
-                                            var buttons = win.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
-                                            foreach (var b in buttons)
-                                            {
-                                                try
-                                                {
-                                                    var name = (b.Name ?? string.Empty).Trim();
-                                                    if (string.IsNullOrWhiteSpace(name)) continue;
-                                                    if (NegativeButtonWords.Any(nb => name.IndexOf(nb, StringComparison.OrdinalIgnoreCase) >= 0))
-                                                        continue; // never click negative buttons
-
-                                                    if (FinalOnlyButtonNames.Any(fn => name.IndexOf(fn, StringComparison.OrdinalIgnoreCase) >= 0))
+                                                    // 3) Sophos special handling
+                                                    try
                                                     {
-                                                        // If aggressive mode, click final-only buttons after a short wait
-                                                        if (AggressiveFinalClick)
+                                                        if (TryHandleSophos(win, logCallback))
+                                                        {
+                                                            logCallback?.Invoke("[AUTOMATOR] Sophos window handled.");
+                                                            continue;
+                                                        }
+                                                    }
+                                                    catch (Exception ex) { try { Logger.WriteException(ex, "TryHandleSophos"); } catch { } }
+
+                                                    // 4) Web bootstrapper heuristics
+                                                    try
+                                                    {
+                                                        if (TryAutomateWebBootstrapper(win, logCallback))
+                                                        {
+                                                            logCallback?.Invoke("[AUTOMATOR] Web bootstrapper heuristics applied.");
+                                                            continue;
+                                                        }
+                                                    }
+                                                    catch (Exception ex) { try { Logger.WriteException(ex, "TryAutomateWebBootstrapper"); } catch { } }
+
+                                                    // 5) Generic button heuristics (UIA)
+                                                    try
+                                                    {
+                                                        var buttons = win.FindAllDescendants(cf => cf.ByControlType(ControlType.Button));
+                                                        foreach (var b in buttons)
                                                         {
                                                             try
                                                             {
-                                                                var btn = b.AsButton();
-                                                                if (btn != null && btn.IsEnabled)
+                                                                var name = (b.Name ?? string.Empty).Trim();
+                                                                if (string.IsNullOrWhiteSpace(name)) continue;
+                                                                if (NegativeButtonWords.Any(nb => name.IndexOf(nb, StringComparison.OrdinalIgnoreCase) >= 0))
+                                                                    continue;
+
+                                                                if (System.Text.RegularExpressions.Regex.IsMatch(name, "(next|install|accept|agree|continue|done|finish|close|ok)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                                                                 {
-                                                                    btn.Invoke();
-                                                                    logCallback?.Invoke($"[AUTOMATOR] Invoked final-only button '{name}'");
-                                                                    break;
+                                                                    try
+                                                                    {
+                                                                        var btn = b.AsButton();
+                                                                        if (btn != null && btn.IsEnabled)
+                                                                        {
+                                                                            btn.Invoke();
+                                                                            logCallback?.Invoke($"[AUTOMATOR] Invoked button '{name}' via UIA.");
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                    catch { }
                                                                 }
                                                             }
                                                             catch { }
                                                         }
                                                     }
+                                                    catch { }
 
-                                                    if (System.Text.RegularExpressions.Regex.IsMatch(name, "(next|install|accept|agree|continue|done|finish|ok|run|allow)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                                                    // 6) Try to force final button click if it looks like a final screen
+                                                    try
                                                     {
-                                                        try
+                                                        if (AggressiveFinalClick)
                                                         {
-                                                            var btn = b.AsButton();
-                                                            if (btn != null && btn.IsEnabled)
+                                                            if (TryForceFinalButtonClick(win, logCallback))
                                                             {
-                                                                btn.Invoke();
-                                                                logCallback?.Invoke($"[AUTOMATOR] Invoked button '{name}'");
-                                                                break;
+                                                                logCallback?.Invoke("[AUTOMATOR] Final button clicked (aggressive).");
+                                                                continue;
                                                             }
                                                         }
-                                                        catch { }
                                                     }
+                                                    catch { }
+
+                                                    // 7) If nothing matched, attempt a safe Enter fallback
+                                                    try
+                                                    {
+                                                        SendEnterToWindow(win);
+                                                        logCallback?.Invoke("[AUTOMATOR] Sent Enter fallback to window.");
+                                                    }
+                                                    catch { }
                                                 }
-                                                catch { }
+                                                catch (Exception ex) { try { Logger.WriteException(ex, "WindowLoop:inner"); } catch { } }
                                             }
-                                        }
-                                        catch { }
-
-                                        // If nothing actionable found, try Enter fallback
-                                        try
-                                        {
-                                            // Wait a short time to see if window progresses
-                                            var watch = Stopwatch.StartNew();
-                                            bool progressed = false;
-                                            while (watch.ElapsedMilliseconds < 1200)
-                                            {
-                                                Thread.Sleep(200);
-                                            }
-
-                                            // If still present, send Enter as a gentle fallback (but avoid negative buttons)
-                                            try
-                                            {
-                                                SendEnterToWindow(win);
-                                                logCallback?.Invoke("[AUTOMATOR] Sent Enter fallback to window.");
-                                            }
-                                            catch { }
-                                        }
-                                        catch { }
-
-                                        // Save snapshot for debugging if window persists and no progress after some time
-                                        try
-                                        {
-                                            // If window still exists after PerWindowTimeoutMs, capture snapshot and continue
-                                            // (This is handled by the outer loop timing)
                                         }
                                         catch { }
                                     }
-                                    catch (Exception ex) { try { Logger.WriteException(ex, "InteractWithProcess:window_loop"); } catch { } }
                                 }
+                                catch { }
                             }
-                            catch { }
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        try { Logger.WriteException(ex, "InteractWithProcess:main_loop"); } catch { }
+                        catch (Exception ex)
+                        {
+                            try { Logger.WriteException(ex, "InteractWithProcessAsync:mainloop"); } catch { }
+                        }
+
+                        await Task.Delay(700, token).ConfigureAwait(false);
                     }
 
-                    await Task.Delay(600, token).ContinueWith(_ => { });
+                    logCallback?.Invoke("[AUTOMATOR] InteractWithProcessAsync finished polling windows.");
                 }
-
-                logCallback?.Invoke("[AUTOMATOR] InteractWithProcess finished or timed out.");
+            }
+            catch (OperationCanceledException)
+            {
+                logCallback?.Invoke("[AUTOMATOR] InteractWithProcessAsync cancelled.");
             }
             catch (Exception ex)
             {
                 try { Logger.WriteException(ex, "InteractWithProcessAsync"); } catch { }
+                logCallback?.Invoke("[AUTOMATOR] InteractWithProcessAsync encountered an error: " + ex.Message);
             }
         }
     }
