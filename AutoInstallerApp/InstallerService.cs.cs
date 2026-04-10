@@ -716,145 +716,155 @@ namespace AutoInstallerApp
                 // Unblock file to avoid Open File Security warnings
                 try { UnblockFile(localPath); } catch { }
 
-                // Start process
-                var proc = Process.Start(psi);
-                if (proc == null)
+                // Start the process
+                Process? proc = null;
+                try
                 {
-                    logCallback?.Invoke($"[ERROR] Failed to start installer: {localPath}");
+                    proc = Process.Start(psi);
+                    if (proc != null)
+                    {
+                        CurrentProcess = proc;
+                        ActiveProcesses.TryAdd(proc.Id, proc);
+                        StartedOrder.Enqueue(localPath);
+                        logCallback?.Invoke($"[RUN] Started installer PID={proc.Id}, File={Path.GetFileName(localPath)}");
+                    }
+                    else
+                    {
+                        logCallback?.Invoke($"[ERROR] Failed to start installer: {localPath}");
+                        RecordFailure(localPath, "FailedToStart");
+                        return false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logCallback?.Invoke($"[ERROR] Start failed for {localPath}: {ex.Message}");
+                    RecordFailure(localPath, ex.Message);
                     return false;
                 }
 
-                CurrentProcess = proc;
-                ActiveProcesses.TryAdd(proc.Id, proc);
-                logCallback?.Invoke($"[RUN] Started installer PID={proc.Id}, File={Path.GetFileName(localPath)}");
-
-                // Attach automator (non-elevated) and elevated agent if needed
+                // Launch agent/automator to interact with UI if needed
                 try
                 {
-                    // Fire-and-forget automator attach
-                    var cts = new CancellationTokenSource();
-                    InstallerUiAutomator.InteractWithProcess(proc.Id, logCallback, cts.Token, timeoutMs: 600000, processNameHint: Path.GetFileName(localPath));
+                    // Publish retry flag file for AutoHotkey if needed
+                    CreateRetryFlagForPid(proc.Id);
+
+                    // If an external agent is available, try to attach; otherwise call local automator
+                    try
+                    {
+                        // Prefer local automator call (synchronous attach)
+                        InstallerUiAutomator.InteractWithProcess(proc.Id, logCallback, token, timeoutMs: InstallerUiAutomator.PerWindowTimeoutMs, processNameHint: Path.GetFileNameWithoutExtension(localPath));
+                    }
+                    catch (Exception ex)
+                    {
+                        try { Logger.WriteException(ex, "InstallAsync:InteractWithProcess"); } catch { }
+                    }
                 }
                 catch { }
 
-                // Wait for process exit or cancellation
-                while (!proc.HasExited)
+                // Wait for process exit (use async-friendly wait)
+                try
                 {
-                    if (token.IsCancellationRequested)
+#if NET6_0_OR_GREATER
+                    await proc.WaitForExitAsync(token).ConfigureAwait(false);
+#else
+                    // Fallback for older frameworks
+                    while (!proc.HasExited)
                     {
-                        try { proc.Kill(); } catch { }
-                        logCallback?.Invoke("[INSTALL] Cancel requested; killed installer process.");
-                        ActiveProcesses.TryRemove(proc.Id, out _);
-                        return false;
+                        if (token.IsCancellationRequested) break;
+                        await Task.Delay(300, token).ConfigureAwait(false);
                     }
-                    await Task.Delay(1000, token).ConfigureAwait(false);
+#endif
+                }
+                catch (OperationCanceledException)
+                {
+                    try
+                    {
+                        if (!proc.HasExited)
+                        {
+                            try { proc.Kill(true); } catch { }
+                        }
+                    }
+                    catch { }
+                }
+                catch (Exception ex)
+                {
+                    try { Logger.WriteException(ex, "InstallAsync:WaitForExit"); } catch { }
                 }
 
-                // Process exited — give a short grace period for final dialogs to close
-                await Task.Delay(1200, token).ConfigureAwait(false);
+                // Capture exit code
+                int exitCode = 0;
+                try { exitCode = proc.ExitCode; } catch { }
 
-                // Remove active process
-                ActiveProcesses.TryRemove(proc.Id, out _);
+                // Cleanup active processes
+                try { ActiveProcesses.TryRemove(proc.Id, out var _); } catch { }
 
-                // If installer failed (non-zero exit code) consider retry logic
-                bool success = proc.ExitCode == 0;
-                if (!success)
+                // Interpret exit code
+                if (exitCode == 0)
                 {
-                    logCallback?.Invoke($"[INSTALL] Installer exited with code {proc.ExitCode} for {Path.GetFileName(localPath)}");
-                    // Create retry flag so AHK/automator can try alternate strategies on next run
-                    try { CreateRetryFlagForPid(Process.GetCurrentProcess().Id); } catch { }
+                    logCallback?.Invoke($"[DONE] {Path.GetFileName(localPath)}");
+                    return true;
                 }
                 else
                 {
-                    // Ensure retry flag removed on success
-                    try { RemoveRetryFlagForPid(Process.GetCurrentProcess().Id); } catch { }
+                    logCallback?.Invoke($"[ERROR] Installer {Path.GetFileName(localPath)} exited with code {exitCode}");
+                    RecordFailure(localPath, $"ExitCode:{exitCode}");
+                    return false;
                 }
-
-                return success;
             }
             catch (Exception ex)
             {
-                try { Logger.WriteException(ex, "InstallAsync"); } catch { }
+                try { Logger.WriteException(ex, "InstallAsync:outer"); } catch { }
                 logCallback?.Invoke($"[ERROR] InstallAsync exception: {ex.Message}");
+                RecordFailure(file, ex.Message);
                 return false;
             }
         }
 
         // =========================
-        // Helpers para concurrencia y detección
+        // Helpers de concurrencia / utilidades
         // =========================
 
         private static bool IsAnotherInstallerRunning()
         {
             try
             {
-                var procs = Process.GetProcesses();
-                foreach (var p in procs)
-                {
-                    try
-                    {
-                        var name = p.ProcessName.ToLowerInvariant();
-                        if (name.Contains("msiexec") || name.Contains("setup") || name.Contains("install"))
-                        {
-                            if (!ActiveProcesses.ContainsKey(p.Id))
-                                return true;
-                        }
-                    }
-                    catch { }
-                }
+                // If any active process exists, consider it a conflict
+                return ActiveProcesses.Count > 0;
             }
-            catch { }
-            return false;
+            catch { return false; }
         }
 
         private static void WaitForInstallerToBeFree(Action<string> logCallback, CancellationToken token)
         {
             try
             {
-                var sw = Stopwatch.StartNew();
-                while (sw.ElapsedMilliseconds < 30000)
+                int waitMs = InstallerUiAutomator.PerWindowTimeoutMs;
+                int waited = 0;
+                while (IsAnotherInstallerRunning() && !token.IsCancellationRequested && waited < waitMs)
                 {
-                    if (token.IsCancellationRequested) break;
-                    if (!IsAnotherInstallerRunning()) return;
-                    Thread.Sleep(800);
+                    Thread.Sleep(500);
+                    waited += 500;
                 }
             }
-            catch { }
+            catch (Exception ex) { try { Logger.WriteException(ex, "WaitForInstallerToBeFree"); } catch { } }
         }
 
         public static void KillAllActiveProcesses()
         {
-            foreach (var kv in ActiveProcesses.ToArray())
-            {
-                try
-                {
-                    var proc = kv.Value;
-                    if (proc != null && !proc.HasExited)
-                    {
-                        try { proc.Kill(); } catch { }
-                    }
-                }
-                catch (Exception ex) { try { Logger.WriteException(ex, "KillAllActiveProcesses"); } catch { } }
-                finally
-                {
-                    ActiveProcesses.TryRemove(kv.Key, out _);
-                }
-            }
-        }
-
-        // =========================
-        // Métodos auxiliares de depuración
-        // =========================
-
-        public static void DumpStateToLog(Action<string>? logCallback)
-        {
             try
             {
-                logCallback?.Invoke("[STATE] Dumping InstallerService state:");
-                logCallback?.Invoke($"  ActiveProcesses: {ActiveProcesses.Count}");
-                logCallback?.Invoke($"  LocalCopies: {LocalCopies.Count}");
-                logCallback?.Invoke($"  Completed: {Completed.Count}");
-                logCallback?.Invoke($"  FailureReasons: {FailureReasons.Count}");
+                var keys = ActiveProcesses.Keys.ToArray();
+                foreach (var pid in keys)
+                {
+                    try
+                    {
+                        if (ActiveProcesses.TryRemove(pid, out var p))
+                        {
+                            try { if (!p.HasExited) p.Kill(true); } catch { }
+                        }
+                    }
+                    catch { }
+                }
             }
             catch { }
         }

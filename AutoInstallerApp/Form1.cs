@@ -1,3 +1,4 @@
+// Form1.cs
 using AutoInstallerApp.Language;
 using System.Diagnostics;
 
